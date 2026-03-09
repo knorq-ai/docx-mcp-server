@@ -3,8 +3,6 @@ import {
   createTmpDoc,
   cleanupTmpFiles,
   readRawDocXml,
-  ErrorCode,
-  EngineError,
 } from "./helpers.js";
 import {
   readDocument,
@@ -90,6 +88,14 @@ describe("editParagraphs", () => {
     );
     expect(result).toContain("2 paragraph(s)");
   });
+
+  it("handles empty edits array without file I/O", async () => {
+    const p = await createTmpDoc("Unchanged");
+    const result = await editParagraphs(p, [], false);
+    expect(result).toContain("No edits to apply");
+    const doc = await readDocument(p);
+    expect(doc).toContain("Unchanged");
+  });
 });
 
 // =========================================================================
@@ -165,6 +171,33 @@ describe("insertParagraphs", () => {
     );
     expect(result).toContain("3 paragraph(s)");
   });
+
+  it("inserts at different specific positions correctly", async () => {
+    const p = await createTmpDoc("P0\nP1\nP2");
+    await insertParagraphs(
+      p,
+      [
+        { text: "Before P1", position: 1 },
+        { text: "Before P2", position: 2 },
+      ],
+      false,
+    );
+    const doc = await readDocument(p);
+    const posP0 = doc.indexOf("P0");
+    const posBeforeP1 = doc.indexOf("Before P1");
+    const posP1 = doc.indexOf("[1]") > -1 ? doc.indexOf("P1", doc.indexOf("[1]")) : doc.indexOf("P1");
+    const posBeforeP2 = doc.indexOf("Before P2");
+    expect(posP0).toBeLessThan(posBeforeP1);
+    expect(posBeforeP1).toBeLessThan(posBeforeP2);
+  });
+
+  it("handles empty items array without file I/O", async () => {
+    const p = await createTmpDoc("Unchanged");
+    const result = await insertParagraphs(p, [], false);
+    expect(result).toContain("No paragraphs to insert");
+    const doc = await readDocument(p);
+    expect(doc).toContain("Unchanged");
+  });
 });
 
 // =========================================================================
@@ -225,6 +258,12 @@ describe("setHeadingBulk", () => {
     const xml = await readRawDocXml(p);
     expect(xml).toContain('w:val="Heading3"');
     expect(xml).toContain('w:val="2"'); // outlineLvl = level - 1
+  });
+
+  it("handles empty items array without file I/O", async () => {
+    const p = await createTmpDoc("Unchanged");
+    const result = await setHeadingBulk(p, []);
+    expect(result).toContain("No headings to set");
   });
 });
 
@@ -325,5 +364,10 @@ describe("editTableCells", () => {
       false,
     );
     expect(result).toContain("3 table cell(s)");
+  });
+
+  it("handles empty edits array without file I/O", async () => {
+    const result = await editTableCells("/tmp/nonexistent.docx", [], false);
+    expect(result).toContain("No cell edits to apply");
   });
 });

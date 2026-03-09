@@ -445,6 +445,82 @@ export async function replaceText(
 // 5. edit_paragraph
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Shared helper: replace paragraph text content in-place
+// ---------------------------------------------------------------------------
+
+/** Replace the text content of a w:p element, preserving pPr, structural elements, and optionally tracking changes. */
+function replaceParagraphText(
+  element: XNode,
+  newText: string,
+  ctx: RevisionContext | null,
+): void {
+  const pChildren = element["w:p"] as XNode[];
+  const pPr = findOne(pChildren, "w:pPr");
+
+  // Collect structural elements that must be preserved (bookmarks, comment ranges, drawings)
+  const structuralElements: XNode[] = [];
+  for (const child of pChildren) {
+    if (
+      child["w:bookmarkStart"] !== undefined ||
+      child["w:bookmarkEnd"] !== undefined ||
+      child["w:commentRangeStart"] !== undefined ||
+      child["w:commentRangeEnd"] !== undefined ||
+      child["w:commentReference"] !== undefined
+    ) {
+      structuralElements.push(child);
+    } else if (child["w:r"]) {
+      const runC = child["w:r"] as XNode[];
+      const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
+      if (hasDrawing) structuralElements.push(child);
+    }
+  }
+
+  if (ctx) {
+    // Extract current full text and first rPr from existing runs
+    let oldText = "";
+    let firstRPr: XNode | null = null;
+    for (const child of pChildren) {
+      if (child["w:r"]) {
+        const runC = child["w:r"] as XNode[];
+        const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
+        if (hasDrawing) continue;
+        const rPr = getRunRPr(runC);
+        if (!firstRPr && rPr) firstRPr = rPr;
+        oldText += extractRunText(runC);
+      } else if (child["w:ins"]) {
+        for (const insChild of child["w:ins"]) {
+          if (insChild["w:r"]) {
+            const runC = insChild["w:r"] as XNode[];
+            const rPr = getRunRPr(runC);
+            if (!firstRPr && rPr) firstRPr = rPr;
+            oldText += extractRunText(runC);
+          }
+        }
+      }
+    }
+
+    const diff = computeMinimalDiff(oldText, newText);
+    const newChildren: XNode[] = [];
+    if (pPr) newChildren.push(pPr);
+    newChildren.push(...structuralElements);
+    if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
+    if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
+    if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
+    if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
+    element["w:p"] = newChildren;
+  } else {
+    const newRun = el("w:r", [
+      el("w:t", [textNode(newText)], { "xml:space": "preserve" }),
+    ]);
+    const newChildren: XNode[] = [];
+    if (pPr) newChildren.push(pPr);
+    newChildren.push(...structuralElements);
+    newChildren.push(newRun);
+    element["w:p"] = newChildren;
+  }
+}
+
 export async function editParagraph(
   filePath: string,
   paragraphIndex: number,
@@ -462,98 +538,17 @@ export async function editParagraph(
       throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
     }
 
-    const bodyIdx = bodyIdxs[paragraphIndex];
-    const element = body[bodyIdx];
+    const element = body[bodyIdxs[paragraphIndex]];
 
     if (!element["w:p"]) {
       throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${paragraphIndex} is not a paragraph (it may be a table).`);
     }
 
-    const pChildren = element["w:p"] as XNode[];
+    const ctx = trackChanges
+      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      : null;
 
-    // Keep paragraph properties (pPr) if they exist
-    const pPr = findOne(pChildren, "w:pPr");
-
-    // Collect structural elements that must be preserved (bookmarks, comment ranges, drawings)
-    const structuralElements: XNode[] = [];
-    for (const child of pChildren) {
-      if (
-        child["w:bookmarkStart"] !== undefined ||
-        child["w:bookmarkEnd"] !== undefined ||
-        child["w:commentRangeStart"] !== undefined ||
-        child["w:commentRangeEnd"] !== undefined ||
-        child["w:commentReference"] !== undefined
-      ) {
-        structuralElements.push(child);
-      } else if (child["w:r"]) {
-        // Preserve runs that contain drawings (no text)
-        const runC = child["w:r"] as XNode[];
-        const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
-        if (hasDrawing) structuralElements.push(child);
-      }
-    }
-
-    if (trackChanges) {
-      const maxId = scanMaxId(parsed);
-      const ctx = newRevisionContext(maxId + 1, author);
-
-      // Extract current full text and first rPr from existing runs
-      let oldText = "";
-      let firstRPr: XNode | null = null;
-      for (const child of pChildren) {
-        if (child["w:r"]) {
-          const runC = child["w:r"] as XNode[];
-          const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
-          if (hasDrawing) continue;
-          const rPr = getRunRPr(runC);
-          if (!firstRPr && rPr) firstRPr = rPr;
-          oldText += extractRunText(runC);
-        } else if (child["w:ins"]) {
-          for (const insChild of child["w:ins"]) {
-            if (insChild["w:r"]) {
-              const runC = insChild["w:r"] as XNode[];
-              const rPr = getRunRPr(runC);
-              if (!firstRPr && rPr) firstRPr = rPr;
-              oldText += extractRunText(runC);
-            }
-          }
-        }
-      }
-
-      // Compute minimal diff: only mark the changed portion, keep common prefix/suffix
-      const diff = computeMinimalDiff(oldText, newText);
-
-      const newChildren: XNode[] = [];
-      if (pPr) newChildren.push(pPr);
-      newChildren.push(...structuralElements);
-      if (diff.prefix) {
-        newChildren.push(makeTextRun(diff.prefix, firstRPr));
-      }
-      if (diff.oldMiddle) {
-        newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
-      }
-      if (diff.newMiddle) {
-        newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
-      }
-      if (diff.suffix) {
-        newChildren.push(makeTextRun(diff.suffix, firstRPr));
-      }
-
-      element["w:p"] = newChildren;
-    } else {
-      // Build new paragraph content: preserve pPr + structural elements + new single run with text
-      const newRun = el("w:r", [
-        el("w:t", [textNode(newText)], { "xml:space": "preserve" }),
-      ]);
-
-      const newChildren: XNode[] = [];
-      if (pPr) newChildren.push(pPr);
-      // Re-insert structural elements
-      newChildren.push(...structuralElements);
-      newChildren.push(newRun);
-
-      element["w:p"] = newChildren;
-    }
+    replaceParagraphText(element, newText, ctx);
 
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
@@ -578,6 +573,10 @@ export async function editParagraphs(
   trackChanges: boolean = true,
   author: string = "Claude",
 ): Promise<string> {
+  if (edits.length === 0) {
+    return `No edits to apply.`;
+  }
+
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
@@ -600,72 +599,7 @@ export async function editParagraphs(
       : null;
 
     for (const edit of edits) {
-      const bodyIdx = bodyIdxs[edit.paragraphIndex];
-      const element = body[bodyIdx];
-      const pChildren = element["w:p"] as XNode[];
-
-      const pPr = findOne(pChildren, "w:pPr");
-
-      // Collect structural elements
-      const structuralElements: XNode[] = [];
-      for (const child of pChildren) {
-        if (
-          child["w:bookmarkStart"] !== undefined ||
-          child["w:bookmarkEnd"] !== undefined ||
-          child["w:commentRangeStart"] !== undefined ||
-          child["w:commentRangeEnd"] !== undefined ||
-          child["w:commentReference"] !== undefined
-        ) {
-          structuralElements.push(child);
-        } else if (child["w:r"]) {
-          const runC = child["w:r"] as XNode[];
-          const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
-          if (hasDrawing) structuralElements.push(child);
-        }
-      }
-
-      if (ctx) {
-        let oldText = "";
-        let firstRPr: XNode | null = null;
-        for (const child of pChildren) {
-          if (child["w:r"]) {
-            const runC = child["w:r"] as XNode[];
-            const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
-            if (hasDrawing) continue;
-            const rPr = getRunRPr(runC);
-            if (!firstRPr && rPr) firstRPr = rPr;
-            oldText += extractRunText(runC);
-          } else if (child["w:ins"]) {
-            for (const insChild of child["w:ins"]) {
-              if (insChild["w:r"]) {
-                const runC = insChild["w:r"] as XNode[];
-                const rPr = getRunRPr(runC);
-                if (!firstRPr && rPr) firstRPr = rPr;
-                oldText += extractRunText(runC);
-              }
-            }
-          }
-        }
-
-        const diff = computeMinimalDiff(oldText, edit.newText);
-        const newChildren: XNode[] = [];
-        if (pPr) newChildren.push(pPr);
-        newChildren.push(...structuralElements);
-        if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
-        if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
-        if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
-        if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
-        element["w:p"] = newChildren;
-      } else {
-        const newRun = el("w:r", [
-          el("w:t", [textNode(edit.newText)], { "xml:space": "preserve" }),
-        ]);
-        const newChildren: XNode[] = [];
-        if (pPr) newChildren.push(pPr);
-        newChildren.push(...structuralElements);
-        newChildren.push(newRun);
-        element["w:p"] = newChildren;
-      }
+      replaceParagraphText(body[bodyIdxs[edit.paragraphIndex]], edit.newText, ctx);
     }
 
     serializeDocXml(handle, parsed);
@@ -679,6 +613,87 @@ export async function editParagraphs(
 // ---------------------------------------------------------------------------
 // 6. insert_paragraph
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shared helper: build a new paragraph element
+// ---------------------------------------------------------------------------
+
+/** Build a w:p element with optional style and tracked insertion context. */
+function buildNewParagraph(
+  text: string,
+  style: string | undefined,
+  ctx: RevisionContext | null,
+): XNode {
+  const pChildren: XNode[] = [];
+
+  if (ctx) {
+    const rPrIns = el("w:ins", [], {
+      "w:id": String(allocRevId(ctx)),
+      "w:author": ctx.author,
+      "w:date": ctx.date,
+    });
+    if (style) {
+      pChildren.push(
+        el("w:pPr", [
+          el("w:pStyle", [], { "w:val": style }),
+          el("w:rPr", [rPrIns]),
+        ]),
+      );
+    } else {
+      pChildren.push(el("w:pPr", [el("w:rPr", [rPrIns])]));
+    }
+
+    const insRuns: XNode[] = [];
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) insRuns.push(el("w:r", [el("w:br")]));
+      if (lines[i]) {
+        insRuns.push(
+          el("w:r", [
+            el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
+          ]),
+        );
+      }
+    }
+    pChildren.push(wrapInIns(insRuns, ctx));
+  } else {
+    if (style) {
+      pChildren.push(el("w:pPr", [el("w:pStyle", [], { "w:val": style })]));
+    }
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) pChildren.push(el("w:r", [el("w:br")]));
+      if (lines[i]) {
+        pChildren.push(
+          el("w:r", [
+            el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
+          ]),
+        );
+      }
+    }
+  }
+
+  return el("w:p", pChildren);
+}
+
+/** Insert a paragraph element into body at the given position, handling sectPr and append. */
+function spliceNewParagraph(
+  body: XNode[],
+  bodyIdxs: number[],
+  position: number,
+  newPara: XNode,
+): void {
+  if (position < 0 || position >= bodyIdxs.length) {
+    const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
+    if (sectPrIdx !== -1) {
+      body.splice(sectPrIdx, 0, newPara);
+    } else {
+      body.push(newPara);
+    }
+  } else {
+    body.splice(bodyIdxs[position], 0, newPara);
+  }
+}
 
 export async function insertParagraph(
   filePath: string,
@@ -694,83 +709,12 @@ export async function insertParagraph(
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
 
-    // Build the new paragraph
-    const pChildren: XNode[] = [];
+    const ctx = trackChanges
+      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      : null;
 
-    if (trackChanges) {
-      const maxId = scanMaxId(parsed);
-      const ctx = newRevisionContext(maxId + 1, author);
-
-      // Build pPr with insertion marker on the paragraph break
-      const rPrIns = el("w:ins", [], {
-        "w:id": String(allocRevId(ctx)),
-        "w:author": ctx.author,
-        "w:date": ctx.date,
-      });
-      if (style) {
-        pChildren.push(
-          el("w:pPr", [
-            el("w:pStyle", [], { "w:val": style }),
-            el("w:rPr", [rPrIns]),
-          ]),
-        );
-      } else {
-        pChildren.push(el("w:pPr", [el("w:rPr", [rPrIns])]));
-      }
-
-      // Wrap content runs in w:ins
-      const insRuns: XNode[] = [];
-      const lines = text.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (i > 0) {
-          insRuns.push(el("w:r", [el("w:br")]));
-        }
-        if (lines[i]) {
-          insRuns.push(
-            el("w:r", [
-              el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
-            ]),
-          );
-        }
-      }
-      pChildren.push(wrapInIns(insRuns, ctx));
-    } else {
-      if (style) {
-        const pPr = el("w:pPr", [el("w:pStyle", [], { "w:val": style })]);
-        pChildren.push(pPr);
-      }
-
-      // Split text by newlines for multiple runs with line breaks
-      const lines = text.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (i > 0) {
-          pChildren.push(el("w:r", [el("w:br")]));
-        }
-        if (lines[i]) {
-          pChildren.push(
-            el("w:r", [
-              el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
-            ]),
-          );
-        }
-      }
-    }
-
-    const newPara = el("w:p", pChildren);
-
-    // Insert at position
-    if (position < 0 || position >= bodyIdxs.length) {
-      // Insert before sectPr (at end of content)
-      const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
-      if (sectPrIdx !== -1) {
-        body.splice(sectPrIdx, 0, newPara);
-      } else {
-        body.push(newPara);
-      }
-    } else {
-      const bodyIdx = bodyIdxs[position];
-      body.splice(bodyIdx, 0, newPara);
-    }
+    const newPara = buildNewParagraph(text, style, ctx);
+    spliceNewParagraph(body, bodyIdxs, position, newPara);
 
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
@@ -796,87 +740,35 @@ export async function insertParagraphs(
   trackChanges: boolean = true,
   author: string = "Claude",
 ): Promise<string> {
+  if (items.length === 0) {
+    return `No paragraphs to insert.`;
+  }
+
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
 
     const ctx = trackChanges
       ? newRevisionContext(scanMaxId(parsed) + 1, author)
       : null;
 
-    // Sort by position descending so earlier inserts don't shift later ones
+    // Sort by position descending so higher-index inserts don't shift lower ones.
+    // Append-position items (position < 0 or out of range) sort to the front
+    // so they are processed before specific-position items.
     const sorted = [...items].sort((a, b) => {
-      // -1 (append) positions go last in the sorted order (process first since descending)
+      const bodyIdxs = blockBodyIndices(body);
       const posA = a.position < 0 || a.position >= bodyIdxs.length ? Infinity : a.position;
       const posB = b.position < 0 || b.position >= bodyIdxs.length ? Infinity : b.position;
+      if (posA === posB) return 0;
       return posB - posA;
     });
 
     for (const item of sorted) {
-      const pChildren: XNode[] = [];
-
-      if (ctx) {
-        const rPrIns = el("w:ins", [], {
-          "w:id": String(allocRevId(ctx)),
-          "w:author": ctx.author,
-          "w:date": ctx.date,
-        });
-        if (item.style) {
-          pChildren.push(
-            el("w:pPr", [
-              el("w:pStyle", [], { "w:val": item.style }),
-              el("w:rPr", [rPrIns]),
-            ]),
-          );
-        } else {
-          pChildren.push(el("w:pPr", [el("w:rPr", [rPrIns])]));
-        }
-
-        const insRuns: XNode[] = [];
-        const lines = item.text.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (i > 0) insRuns.push(el("w:r", [el("w:br")]));
-          if (lines[i]) {
-            insRuns.push(
-              el("w:r", [
-                el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
-              ]),
-            );
-          }
-        }
-        pChildren.push(wrapInIns(insRuns, ctx));
-      } else {
-        if (item.style) {
-          pChildren.push(el("w:pPr", [el("w:pStyle", [], { "w:val": item.style })]));
-        }
-        const lines = item.text.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (i > 0) pChildren.push(el("w:r", [el("w:br")]));
-          if (lines[i]) {
-            pChildren.push(
-              el("w:r", [
-                el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
-              ]),
-            );
-          }
-        }
-      }
-
-      const newPara = el("w:p", pChildren);
-
-      if (item.position < 0 || item.position >= bodyIdxs.length) {
-        const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
-        if (sectPrIdx !== -1) {
-          body.splice(sectPrIdx, 0, newPara);
-        } else {
-          body.push(newPara);
-        }
-      } else {
-        const bodyIdx = bodyIdxs[item.position];
-        body.splice(bodyIdx, 0, newPara);
-      }
+      const newPara = buildNewParagraph(item.text, item.style, ctx);
+      // Recalculate indices after each splice to avoid stale mapping
+      const currentBodyIdxs = blockBodyIndices(body);
+      spliceNewParagraph(body, currentBodyIdxs, item.position, newPara);
     }
 
     serializeDocXml(handle, parsed);
@@ -1947,6 +1839,37 @@ export async function insertTable(
 // 16. set_heading
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Shared helper: apply heading level to a paragraph element
+// ---------------------------------------------------------------------------
+
+/** Set pStyle to Heading{level} and outlineLvl to level-1 on a w:p element. */
+function applyHeadingLevel(pChildren: XNode[], level: number): void {
+  let pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) {
+    pPr = el("w:pPr");
+    pChildren.unshift(pPr);
+  }
+
+  const props = pPr["w:pPr"] as XNode[];
+  const styleId = `Heading${level}`;
+  const pStyleIdx = props.findIndex((n: XNode) => n["w:pStyle"] !== undefined);
+  const pStyleEl = el("w:pStyle", [], { "w:val": styleId });
+  if (pStyleIdx !== -1) {
+    props[pStyleIdx] = pStyleEl;
+  } else {
+    props.unshift(pStyleEl);
+  }
+
+  const olvlIdx = props.findIndex((n: XNode) => n["w:outlineLvl"] !== undefined);
+  const olvlEl = el("w:outlineLvl", [], { "w:val": String(level - 1) });
+  if (olvlIdx !== -1) {
+    props[olvlIdx] = olvlEl;
+  } else {
+    props.push(olvlEl);
+  }
+}
+
 export async function setHeading(
   filePath: string,
   paragraphIndex: number,
@@ -1966,38 +1889,13 @@ export async function setHeading(
       throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
     }
 
-    const bodyIdx = bodyIdxs[paragraphIndex];
-    const element = body[bodyIdx];
+    const element = body[bodyIdxs[paragraphIndex]];
 
     if (!element["w:p"]) {
       throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${paragraphIndex} is not a paragraph.`);
     }
 
-    const pChildren = element["w:p"] as XNode[];
-    let pPr = findOne(pChildren, "w:pPr");
-    if (!pPr) {
-      pPr = el("w:pPr");
-      pChildren.unshift(pPr);
-    }
-
-    const props = pPr["w:pPr"] as XNode[];
-    const styleId = `Heading${level}`;
-    const pStyleIdx = props.findIndex((n: XNode) => n["w:pStyle"] !== undefined);
-    const pStyleEl = el("w:pStyle", [], { "w:val": styleId });
-    if (pStyleIdx !== -1) {
-      props[pStyleIdx] = pStyleEl;
-    } else {
-      props.unshift(pStyleEl);
-    }
-
-    // Also add outline level
-    const olvlIdx = props.findIndex((n: XNode) => n["w:outlineLvl"] !== undefined);
-    const olvlEl = el("w:outlineLvl", [], { "w:val": String(level - 1) });
-    if (olvlIdx !== -1) {
-      props[olvlIdx] = olvlEl;
-    } else {
-      props.push(olvlEl);
-    }
+    applyHeadingLevel(element["w:p"] as XNode[], level);
 
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
@@ -2019,6 +1917,10 @@ export async function setHeadingBulk(
   filePath: string,
   items: SetHeadingItem[],
 ): Promise<string> {
+  if (items.length === 0) {
+    return `No headings to set.`;
+  }
+
   // Validate levels upfront (before acquiring file lock)
   for (const item of items) {
     if (item.level < 1 || item.level > 9) {
@@ -2043,35 +1945,8 @@ export async function setHeadingBulk(
       }
     }
 
-    // Apply headings
     for (const item of items) {
-      const bodyIdx = bodyIdxs[item.paragraphIndex];
-      const element = body[bodyIdx];
-      const pChildren = element["w:p"] as XNode[];
-
-      let pPr = findOne(pChildren, "w:pPr");
-      if (!pPr) {
-        pPr = el("w:pPr");
-        pChildren.unshift(pPr);
-      }
-
-      const props = pPr["w:pPr"] as XNode[];
-      const styleId = `Heading${item.level}`;
-      const pStyleIdx = props.findIndex((n: XNode) => n["w:pStyle"] !== undefined);
-      const pStyleEl = el("w:pStyle", [], { "w:val": styleId });
-      if (pStyleIdx !== -1) {
-        props[pStyleIdx] = pStyleEl;
-      } else {
-        props.unshift(pStyleEl);
-      }
-
-      const olvlIdx = props.findIndex((n: XNode) => n["w:outlineLvl"] !== undefined);
-      const olvlEl = el("w:outlineLvl", [], { "w:val": String(item.level - 1) });
-      if (olvlIdx !== -1) {
-        props[olvlIdx] = olvlEl;
-      } else {
-        props.push(olvlEl);
-      }
+      applyHeadingLevel(body[bodyIdxs[item.paragraphIndex]]["w:p"] as XNode[], item.level);
     }
 
     serializeDocXml(handle, parsed);
@@ -2335,6 +2210,92 @@ export async function readHeaderFooter(filePath: string): Promise<string> {
 // 22. edit_table_cell
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Shared helper: replace cell text content in-place
+// ---------------------------------------------------------------------------
+
+/** Replace the text content of a cell's first paragraph, preserving pPr. */
+function replaceCellText(
+  paraEl: XNode,
+  newText: string,
+  ctx: RevisionContext | null,
+): void {
+  const pChildren = paraEl["w:p"] as XNode[];
+  const pPr = findOne(pChildren, "w:pPr");
+
+  if (ctx) {
+    let oldText = "";
+    let firstRPr: XNode | null = null;
+    for (const child of pChildren) {
+      if (child["w:r"]) {
+        const runC = child["w:r"] as XNode[];
+        const rPr = getRunRPr(runC);
+        if (!firstRPr && rPr) firstRPr = rPr;
+        oldText += extractRunText(runC);
+      }
+    }
+
+    const diff = computeMinimalDiff(oldText, newText);
+    const newChildren: XNode[] = [];
+    if (pPr) newChildren.push(pPr);
+    if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
+    if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
+    if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
+    if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
+    paraEl["w:p"] = newChildren;
+  } else {
+    const newRun = el("w:r", [
+      el("w:t", [textNode(newText)], { "xml:space": "preserve" }),
+    ]);
+    const newChildren: XNode[] = [];
+    if (pPr) newChildren.push(pPr);
+    newChildren.push(newRun);
+    paraEl["w:p"] = newChildren;
+  }
+}
+
+/** Navigate to a specific cell in a table block and return its first paragraph element. */
+function getTableCellParagraph(
+  body: XNode[],
+  bodyIdxs: number[],
+  blockIndex: number,
+  rowIndex: number,
+  colIndex: number,
+): XNode {
+  if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
+  }
+
+  const element = body[bodyIdxs[blockIndex]];
+
+  if (!element["w:tbl"]) {
+    throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
+  }
+
+  const tblChildren = element["w:tbl"] as XNode[];
+  const rows = findAll(tblChildren, "w:tr");
+
+  if (rowIndex < 0 || rowIndex >= rows.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
+  }
+
+  const row = rows[rowIndex];
+  const cells = findAll(row["w:tr"], "w:tc");
+
+  if (colIndex < 0 || colIndex >= cells.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${colIndex} out of range (0–${cells.length - 1}).`);
+  }
+
+  const cell = cells[colIndex];
+  const cellChildren = cell["w:tc"] as XNode[];
+  const paraEl = cellChildren.find((c: XNode) => c["w:p"]);
+  if (!paraEl) {
+    throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Cell [${rowIndex},${colIndex}] has no paragraph.`);
+  }
+
+  return paraEl;
+}
+
 export async function editTableCell(
   filePath: string,
   blockIndex: number,
@@ -2350,74 +2311,13 @@ export async function editTableCell(
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
 
-    if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
-      throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
-    }
+    const paraEl = getTableCellParagraph(body, bodyIdxs, blockIndex, rowIndex, colIndex);
 
-    const bodyIdx = bodyIdxs[blockIndex];
-    const element = body[bodyIdx];
+    const ctx = trackChanges
+      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      : null;
 
-    if (!element["w:tbl"]) {
-      throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
-    }
-
-    const tblChildren = element["w:tbl"] as XNode[];
-    const rows = findAll(tblChildren, "w:tr");
-
-    if (rowIndex < 0 || rowIndex >= rows.length) {
-      throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
-    }
-
-    const row = rows[rowIndex];
-    const cells = findAll(row["w:tr"], "w:tc");
-
-    if (colIndex < 0 || colIndex >= cells.length) {
-      throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${colIndex} out of range (0–${cells.length - 1}).`);
-    }
-
-    const cell = cells[colIndex];
-    const cellChildren = cell["w:tc"] as XNode[];
-    const paraEl = cellChildren.find((c: XNode) => c["w:p"]);
-    if (!paraEl) {
-      throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Cell [${rowIndex},${colIndex}] has no paragraph.`);
-    }
-
-    const pChildren = paraEl["w:p"] as XNode[];
-    const pPr = findOne(pChildren, "w:pPr");
-
-    if (trackChanges) {
-      const maxId = scanMaxId(parsed);
-      const ctx = newRevisionContext(maxId + 1, author);
-
-      let oldText = "";
-      let firstRPr: XNode | null = null;
-      for (const child of pChildren) {
-        if (child["w:r"]) {
-          const runC = child["w:r"] as XNode[];
-          const rPr = getRunRPr(runC);
-          if (!firstRPr && rPr) firstRPr = rPr;
-          oldText += extractRunText(runC);
-        }
-      }
-
-      const diff = computeMinimalDiff(oldText, newText);
-
-      const newChildren: XNode[] = [];
-      if (pPr) newChildren.push(pPr);
-      if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
-      if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
-      if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
-      if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
-      paraEl["w:p"] = newChildren;
-    } else {
-      const newRun = el("w:r", [
-        el("w:t", [textNode(newText)], { "xml:space": "preserve" }),
-      ]);
-      const newChildren: XNode[] = [];
-      if (pPr) newChildren.push(pPr);
-      newChildren.push(newRun);
-      paraEl["w:p"] = newChildren;
-    }
+    replaceCellText(paraEl, newText, ctx);
 
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
@@ -2444,6 +2344,10 @@ export async function editTableCells(
   trackChanges: boolean = true,
   author: string = "Claude",
 ): Promise<string> {
+  if (edits.length === 0) {
+    return `No cell edits to apply.`;
+  }
+
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
@@ -2452,23 +2356,7 @@ export async function editTableCells(
 
     // Validate all cells upfront
     for (const edit of edits) {
-      if (edit.blockIndex < 0 || edit.blockIndex >= bodyIdxs.length) {
-        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${edit.blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
-      }
-      const element = body[bodyIdxs[edit.blockIndex]];
-      if (!element["w:tbl"]) {
-        throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${edit.blockIndex} is not a table.`);
-      }
-      const tblChildren = element["w:tbl"] as XNode[];
-      const rows = findAll(tblChildren, "w:tr");
-      if (edit.rowIndex < 0 || edit.rowIndex >= rows.length) {
-        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${edit.rowIndex} out of range (0–${rows.length - 1}) in table at block ${edit.blockIndex}.`);
-      }
-      const row = rows[edit.rowIndex];
-      const cells = findAll(row["w:tr"], "w:tc");
-      if (edit.colIndex < 0 || edit.colIndex >= cells.length) {
-        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${edit.colIndex} out of range (0–${cells.length - 1}) in table at block ${edit.blockIndex}, row ${edit.rowIndex}.`);
-      }
+      getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
     }
 
     const ctx = trackChanges
@@ -2476,49 +2364,8 @@ export async function editTableCells(
       : null;
 
     for (const edit of edits) {
-      const bodyIdx = bodyIdxs[edit.blockIndex];
-      const element = body[bodyIdx];
-      const tblChildren = element["w:tbl"] as XNode[];
-      const rows = findAll(tblChildren, "w:tr");
-      const row = rows[edit.rowIndex];
-      const cells = findAll(row["w:tr"], "w:tc");
-      const cell = cells[edit.colIndex];
-      const cellChildren = cell["w:tc"] as XNode[];
-      const paraEl = cellChildren.find((c: XNode) => c["w:p"]);
-      if (!paraEl) continue;
-
-      const pChildren = paraEl["w:p"] as XNode[];
-      const pPr = findOne(pChildren, "w:pPr");
-
-      if (ctx) {
-        let oldText = "";
-        let firstRPr: XNode | null = null;
-        for (const child of pChildren) {
-          if (child["w:r"]) {
-            const runC = child["w:r"] as XNode[];
-            const rPr = getRunRPr(runC);
-            if (!firstRPr && rPr) firstRPr = rPr;
-            oldText += extractRunText(runC);
-          }
-        }
-
-        const diff = computeMinimalDiff(oldText, edit.newText);
-        const newChildren: XNode[] = [];
-        if (pPr) newChildren.push(pPr);
-        if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
-        if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
-        if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
-        if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
-        paraEl["w:p"] = newChildren;
-      } else {
-        const newRun = el("w:r", [
-          el("w:t", [textNode(edit.newText)], { "xml:space": "preserve" }),
-        ]);
-        const newChildren: XNode[] = [];
-        if (pPr) newChildren.push(pPr);
-        newChildren.push(newRun);
-        paraEl["w:p"] = newChildren;
-      }
+      const paraEl = getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
+      replaceCellText(paraEl, edit.newText, ctx);
     }
 
     serializeDocXml(handle, parsed);
