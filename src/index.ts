@@ -48,7 +48,10 @@ function formatError(e: unknown): string {
   if (e instanceof EngineError) {
     return `[${e.code}] ${e.message}`;
   }
-  return `[INTERNAL_ERROR] ${(e as Error).message}`;
+  if (e instanceof Error) {
+    return `[INTERNAL_ERROR] ${e.message}`;
+  }
+  return `[INTERNAL_ERROR] ${String(e)}`;
 }
 
 // ---------------------------------------------------------------------------

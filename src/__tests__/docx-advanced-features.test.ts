@@ -91,10 +91,10 @@ describe("editTableCell", () => {
     });
   });
 
-  it("throws NOT_A_PARAGRAPH error when block is not a table", async () => {
+  it("throws NOT_A_TABLE error when block is not a table", async () => {
     const p = await createTmpDoc("Just a paragraph");
     await expect(editTableCell(p, 0, 0, 0, "text", false)).rejects.toMatchObject({
-      code: "NOT_A_PARAGRAPH",
+      code: "NOT_A_TABLE",
     });
   });
 

@@ -25,7 +25,6 @@ src/
     docx-comments.test.ts
     docx-structure-layout.test.ts
     docx-advanced-features.test.ts
-    docx-contract-safety.test.ts
     file-lock.test.ts
 ```
 

@@ -2,17 +2,17 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**23 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**25 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
 | Category | Tools |
 |---|---|
-| **Read** | `read_document`, `get_document_info`, `search_text` |
-| **Edit** | `replace_text`, `edit_paragraph`, `insert_paragraph`, `delete_paragraph` |
-| **Format** | `format_text`, `set_paragraph_format`, `highlight_text`, `set_heading` |
+| **Read** | `read_document`, `get_document_info`, `search_text`, `list_images` |
+| **Edit** | `replace_text`, `edit_paragraph`, `insert_paragraph`, `delete_paragraph`, `delete_paragraphs` |
+| **Format** | `format_text`, `set_paragraph_format`, `set_paragraph_format_bulk`, `highlight_text`, `set_heading` |
 | **Structure** | `insert_table`, `create_document` |
-| **Review** | `add_comment`, `read_comments`, `delete_comment` |
+| **Review** | `add_comment`, `add_batch_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
 | **Headers/footers** | `read_header_footer` |
@@ -66,8 +66,8 @@ Just add the config — `npx` downloads and runs it automatically:
 ### Option 3: Build from source
 
 ```bash
-git clone <repo-url>
-cd mcp-server
+git clone https://github.com/knorq-ai/docx-mcp-server.git
+cd docx-mcp-server
 npm install
 npm run build
 npm link        # makes `docx-mcp-server` available globally
@@ -126,7 +126,7 @@ Or reference the built file directly:
   "mcpServers": {
     "docx-editor": {
       "command": "node",
-      "args": ["/absolute/path/to/mcp-server/dist/index.js"]
+      "args": ["/absolute/path/to/docx-mcp-server/dist/index.js"]
     }
   }
 }
@@ -137,7 +137,6 @@ Or reference the built file directly:
 ### Via npm (recommended)
 
 ```bash
-cd mcp-server
 npm publish
 ```
 
@@ -151,10 +150,11 @@ Or skip the install entirely — just share the `.mcp.json` config with the `npx
 
 ### Via zip / git
 
-Share the `mcp-server/` directory. Recipients run:
+Share the repository. Recipients run:
 
 ```bash
-cd mcp-server
+git clone https://github.com/knorq-ai/docx-mcp-server.git
+cd docx-mcp-server
 npm install
 npm run build
 npm link
@@ -181,6 +181,11 @@ file_path
 file_path, query, case_sensitive?
 ```
 
+**`list_images`** — List all embedded images with filenames, dimensions, alt text, and block indices.
+```
+file_path
+```
+
 ### Editing
 
 All editing tools accept `track_changes` (default `true`) and `author` (default `"Claude"`).
@@ -205,6 +210,11 @@ file_path, text, position, style?, track_changes?, author?
 file_path, paragraph_index, track_changes?, author?
 ```
 
+**`delete_paragraphs`** — Delete multiple paragraphs in one operation. Handles index reordering internally.
+```
+file_path, paragraph_indices, track_changes?, author?
+```
+
 ### Formatting
 
 **`format_text`** — Apply bold, italic, underline, font, size, color, highlight to matching text.
@@ -215,6 +225,11 @@ file_path, search, bold?, italic?, underline?, strikethrough?, highlight_color?,
 **`set_paragraph_format`** — Set alignment, spacing, indentation on a paragraph.
 ```
 file_path, paragraph_index, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?
+```
+
+**`set_paragraph_format_bulk`** — Apply paragraph formatting to multiple paragraphs in one operation.
+```
+file_path, groups (array of {indices, alignment?, space_before?, ...})
 ```
 
 **`highlight_text`** — Highlight matching text with a color.
@@ -246,9 +261,19 @@ file_path, title?, content?
 file_path, anchor_text, comment_text, author?
 ```
 
-**`read_comments`** — List all comments with IDs, authors, and text.
+**`add_batch_comments`** — Add multiple comments in one operation. Supports partial success.
+```
+file_path, comments (array of {anchor_text, comment_text, author?}), default_author?
+```
+
+**`read_comments`** — List all comments with IDs, authors, text, and threaded replies.
 ```
 file_path
+```
+
+**`reply_to_comment`** — Reply to an existing comment, creating a threaded conversation.
+```
+file_path, parent_comment_id, comment_text, author?
 ```
 
 **`delete_comment`** — Remove a comment by ID.

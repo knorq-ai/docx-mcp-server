@@ -47,6 +47,7 @@ import {
   escapeXml,
 } from "./engine/docx-io.js";
 import {
+  type RevisionContext,
   extractRunText,
   extractParagraphText,
   extractTableText,
@@ -387,6 +388,9 @@ export async function replaceText(
     // Optionally scan headers and footers
     if (includeHeadersFooters) {
       const hfFiles = getHeaderFooterFiles(handle);
+      // Track running max revision ID across all header/footer files
+      let hfMaxId = trackChanges ? scanMaxId(parsed) : 0;
+
       for (const hfFile of hfFiles) {
         const hfXml = await handle.zip.file(hfFile)?.async("string");
         if (!hfXml) continue;
@@ -397,8 +401,7 @@ export async function replaceText(
         const hfChildren = rootEl["w:hdr"] ?? rootEl["w:ftr"];
 
         if (trackChanges) {
-          const maxId2 = scanMaxId(parsed);
-          const ctx2 = newRevisionContext(maxId2 + 1, author);
+          const ctx2 = newRevisionContext(hfMaxId + 1, author);
           for (const child of hfChildren) {
             if (child["w:p"]) {
               totalReplacements += replaceInParagraphTracked(child["w:p"], search, replace, caseSensitive, ctx2);
@@ -408,6 +411,8 @@ export async function replaceText(
               });
             }
           }
+          // Advance running ID so the next file doesn't overlap
+          hfMaxId = ctx2.nextId - 1;
           handle.zip.file(hfFile, builder.build(hfParsed));
         } else {
           for (const child of hfChildren) {
@@ -663,6 +668,77 @@ export async function insertParagraph(
 }
 
 // ---------------------------------------------------------------------------
+// Shared helper: mark a block element (w:p or w:tbl) as tracked deletion
+// ---------------------------------------------------------------------------
+
+/** Convert all runs in a paragraph to tracked deletions. */
+function markParagraphRunsAsDeleted(pChildren: XNode[], ctx: RevisionContext): void {
+  // Add deletion marker on the paragraph break via pPr > rPr > w:del
+  let pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) {
+    pPr = el("w:pPr");
+    pChildren.unshift(pPr);
+  }
+  const pPrChildren = pPr["w:pPr"] as XNode[];
+  let rPrInPPr = findOne(pPrChildren, "w:rPr");
+  if (!rPrInPPr) {
+    rPrInPPr = el("w:rPr");
+    pPrChildren.push(rPrInPPr);
+  }
+  (rPrInPPr["w:rPr"] as XNode[]).push(
+    el("w:del", [], {
+      "w:id": String(allocRevId(ctx)),
+      "w:author": ctx.author,
+      "w:date": ctx.date,
+    }),
+  );
+
+  // Convert all runs to w:del with w:delText
+  const delRuns: XNode[] = [];
+  const indicesToRemove: number[] = [];
+  for (let i = 0; i < pChildren.length; i++) {
+    const child = pChildren[i];
+    if (child["w:r"]) {
+      const runC = child["w:r"] as XNode[];
+      const rPr = getRunRPr(runC);
+      const runText = extractRunText(runC);
+      if (runText) {
+        delRuns.push(makeDelTextRun(runText, rPr));
+      }
+      indicesToRemove.push(i);
+    }
+  }
+
+  // Remove original runs (reverse order to preserve indices)
+  for (let i = indicesToRemove.length - 1; i >= 0; i--) {
+    pChildren.splice(indicesToRemove[i], 1);
+  }
+
+  // Append the w:del element with all deleted runs
+  if (delRuns.length > 0) {
+    pChildren.push(wrapInDel(delRuns, ctx));
+  }
+}
+
+/** Mark a body-level block element (paragraph or table) as tracked deletion. */
+function markBlockAsDeleted(element: XNode, ctx: RevisionContext): void {
+  if (element["w:p"]) {
+    markParagraphRunsAsDeleted(element["w:p"] as XNode[], ctx);
+  } else if (element["w:tbl"]) {
+    const rows = findAll(element["w:tbl"], "w:tr");
+    for (const row of rows) {
+      const cells = findAll(row["w:tr"], "w:tc");
+      for (const cell of cells) {
+        const paras = findAll(cell["w:tc"], "w:p");
+        for (const p of paras) {
+          markParagraphRunsAsDeleted(p["w:p"] as XNode[], ctx);
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 7. delete_paragraph
 // ---------------------------------------------------------------------------
 
@@ -685,86 +761,9 @@ export async function deleteParagraph(
     const bodyIdx = bodyIdxs[paragraphIndex];
 
     if (trackChanges) {
-      const element = body[bodyIdx];
       const maxId = scanMaxId(parsed);
       const ctx = newRevisionContext(maxId + 1, author);
-
-      if (element["w:p"]) {
-        const pChildren = element["w:p"] as XNode[];
-
-        // Add deletion marker on the paragraph break via pPr > rPr > w:del
-        let pPr = findOne(pChildren, "w:pPr");
-        if (!pPr) {
-          pPr = el("w:pPr");
-          pChildren.unshift(pPr);
-        }
-        const pPrChildren = pPr["w:pPr"] as XNode[];
-        let rPrInPPr = findOne(pPrChildren, "w:rPr");
-        if (!rPrInPPr) {
-          rPrInPPr = el("w:rPr");
-          pPrChildren.push(rPrInPPr);
-        }
-        (rPrInPPr["w:rPr"] as XNode[]).push(
-          el("w:del", [], {
-            "w:id": String(allocRevId(ctx)),
-            "w:author": ctx.author,
-            "w:date": ctx.date,
-          }),
-        );
-
-        // Convert all runs to w:del with w:delText
-        const delRuns: XNode[] = [];
-        const indicesToRemove: number[] = [];
-        for (let i = 0; i < pChildren.length; i++) {
-          const child = pChildren[i];
-          if (child["w:r"]) {
-            const runC = child["w:r"] as XNode[];
-            const rPr = getRunRPr(runC);
-            const runText = extractRunText(runC);
-            if (runText) {
-              delRuns.push(makeDelTextRun(runText, rPr));
-            }
-            indicesToRemove.push(i);
-          }
-        }
-
-        // Remove original runs (reverse order to preserve indices)
-        for (let i = indicesToRemove.length - 1; i >= 0; i--) {
-          pChildren.splice(indicesToRemove[i], 1);
-        }
-
-        // Append the w:del element with all deleted runs
-        if (delRuns.length > 0) {
-          pChildren.push(wrapInDel(delRuns, ctx));
-        }
-      } else if (element["w:tbl"]) {
-        // For tables, mark all cell content as deleted
-        const rows = findAll(element["w:tbl"], "w:tr");
-        for (const row of rows) {
-          const cells = findAll(row["w:tr"], "w:tc");
-          for (const cell of cells) {
-            const paras = findAll(cell["w:tc"], "w:p");
-            for (const p of paras) {
-              const pc = p["w:p"] as XNode[];
-              const delRuns: XNode[] = [];
-              const toRemove: number[] = [];
-              for (let i = 0; i < pc.length; i++) {
-                if (pc[i]["w:r"]) {
-                  const runC = pc[i]["w:r"] as XNode[];
-                  const rPr = getRunRPr(runC);
-                  const runText = extractRunText(runC);
-                  if (runText) delRuns.push(makeDelTextRun(runText, rPr));
-                  toRemove.push(i);
-                }
-              }
-              for (let i = toRemove.length - 1; i >= 0; i--) {
-                pc.splice(toRemove[i], 1);
-              }
-              if (delRuns.length > 0) pc.push(wrapInDel(delRuns, ctx));
-            }
-          }
-        }
-      }
+      markBlockAsDeleted(body[bodyIdx], ctx);
     } else {
       body.splice(bodyIdx, 1);
     }
@@ -807,85 +806,7 @@ export async function deleteParagraphs(
       const ctx = newRevisionContext(maxId + 1, author);
 
       for (const idx of paragraphIndices) {
-        const bodyIdx = bodyIdxs[idx];
-        const element = body[bodyIdx];
-
-        if (element["w:p"]) {
-          const pChildren = element["w:p"] as XNode[];
-
-          // Add deletion marker on the paragraph break via pPr > rPr > w:del
-          let pPr = findOne(pChildren, "w:pPr");
-          if (!pPr) {
-            pPr = el("w:pPr");
-            pChildren.unshift(pPr);
-          }
-          const pPrChildren = pPr["w:pPr"] as XNode[];
-          let rPrInPPr = findOne(pPrChildren, "w:rPr");
-          if (!rPrInPPr) {
-            rPrInPPr = el("w:rPr");
-            pPrChildren.push(rPrInPPr);
-          }
-          (rPrInPPr["w:rPr"] as XNode[]).push(
-            el("w:del", [], {
-              "w:id": String(allocRevId(ctx)),
-              "w:author": ctx.author,
-              "w:date": ctx.date,
-            }),
-          );
-
-          // Convert all runs to w:del with w:delText
-          const delRuns: XNode[] = [];
-          const indicesToRemove: number[] = [];
-          for (let i = 0; i < pChildren.length; i++) {
-            const child = pChildren[i];
-            if (child["w:r"]) {
-              const runC = child["w:r"] as XNode[];
-              const rPr = getRunRPr(runC);
-              const runText = extractRunText(runC);
-              if (runText) {
-                delRuns.push(makeDelTextRun(runText, rPr));
-              }
-              indicesToRemove.push(i);
-            }
-          }
-
-          // Remove original runs (reverse order to preserve indices)
-          for (let i = indicesToRemove.length - 1; i >= 0; i--) {
-            pChildren.splice(indicesToRemove[i], 1);
-          }
-
-          // Append the w:del element with all deleted runs
-          if (delRuns.length > 0) {
-            pChildren.push(wrapInDel(delRuns, ctx));
-          }
-        } else if (element["w:tbl"]) {
-          // For tables, mark all cell content as deleted
-          const rows = findAll(element["w:tbl"], "w:tr");
-          for (const row of rows) {
-            const cells = findAll(row["w:tr"], "w:tc");
-            for (const cell of cells) {
-              const paras = findAll(cell["w:tc"], "w:p");
-              for (const p of paras) {
-                const pc = p["w:p"] as XNode[];
-                const delRuns: XNode[] = [];
-                const toRemove: number[] = [];
-                for (let i = 0; i < pc.length; i++) {
-                  if (pc[i]["w:r"]) {
-                    const runC = pc[i]["w:r"] as XNode[];
-                    const rPr = getRunRPr(runC);
-                    const runText = extractRunText(runC);
-                    if (runText) delRuns.push(makeDelTextRun(runText, rPr));
-                    toRemove.push(i);
-                  }
-                }
-                for (let i = toRemove.length - 1; i >= 0; i--) {
-                  pc.splice(toRemove[i], 1);
-                }
-                if (delRuns.length > 0) pc.push(wrapInDel(delRuns, ctx));
-              }
-            }
-          }
-        }
+        markBlockAsDeleted(body[bodyIdxs[idx]], ctx);
       }
     } else {
       // Hard delete: sort descending to avoid index shifting
@@ -2142,7 +2063,7 @@ export async function editTableCell(
     const element = body[bodyIdx];
 
     if (!element["w:tbl"]) {
-      throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${blockIndex} is not a table.`);
+      throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
     }
 
     const tblChildren = element["w:tbl"] as XNode[];
@@ -2256,7 +2177,7 @@ export async function readFootnotes(filePath: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// 23. list_images
+// 24. list_images
 // ---------------------------------------------------------------------------
 
 export async function listImages(filePath: string): Promise<string> {

@@ -31,12 +31,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ym259/wscode.git",
-    "directory": "mcp-server"
+    "url": "https://github.com/knorq-ai/docx-mcp-server.git"
   },
-  "homepage": "https://github.com/ym259/wscode/tree/main/mcp-server#readme",
+  "homepage": "https://github.com/knorq-ai/docx-mcp-server#readme",
   "bugs": {
-    "url": "https://github.com/ym259/wscode/issues"
+    "url": "https://github.com/knorq-ai/docx-mcp-server/issues"
   },
   "engines": {
     "node": ">=18"
