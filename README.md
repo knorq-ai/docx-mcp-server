@@ -2,21 +2,21 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**25 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**32 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
 | Category | Tools |
 |---|---|
 | **Read** | `read_document`, `get_document_info`, `search_text`, `list_images` |
-| **Edit** | `replace_text`, `edit_paragraph`, `insert_paragraph`, `delete_paragraph`, `delete_paragraphs` |
-| **Format** | `format_text`, `set_paragraph_format`, `set_paragraph_format_bulk`, `highlight_text`, `set_heading` |
+| **Edit** | `replace_text`, `edit_paragraph`, `edit_paragraphs`, `insert_paragraph`, `insert_paragraphs`, `delete_paragraph`, `delete_paragraphs` |
+| **Format** | `format_text`, `set_paragraph_format`, `set_paragraph_format_bulk`, `highlight_text`, `set_heading`, `set_heading_bulk` |
 | **Structure** | `insert_table`, `create_document` |
 | **Review** | `add_comment`, `add_batch_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
 | **Headers/footers** | `read_header_footer` |
-| **Tables** | `edit_table_cell` |
+| **Tables** | `edit_table_cell`, `edit_table_cells` |
 | **Footnotes** | `read_footnotes` |
 
 ### Track changes
@@ -200,9 +200,19 @@ file_path, search, replace, case_sensitive?, track_changes?, author?, include_he
 file_path, paragraph_index, new_text, track_changes?, author?
 ```
 
+**`edit_paragraphs`** — Replace the text of multiple paragraphs in one operation. Single file read/write cycle.
+```
+file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
+```
+
 **`insert_paragraph`** — Insert a new paragraph at a position.
 ```
 file_path, text, position, style?, track_changes?, author?
+```
+
+**`insert_paragraphs`** — Insert multiple paragraphs in one operation. Handles index shifting internally.
+```
+file_path, items (array of {text, position, style?}), track_changes?, author?
 ```
 
 **`delete_paragraph`** — Delete a paragraph by index.
@@ -240,6 +250,11 @@ file_path, search, color?, case_sensitive?
 **`set_heading`** — Convert a paragraph to a heading (level 1-9).
 ```
 file_path, paragraph_index, level
+```
+
+**`set_heading_bulk`** — Convert multiple paragraphs to headings in one operation.
+```
+file_path, items (array of {paragraph_index, level})
 ```
 
 ### Structure
@@ -317,6 +332,11 @@ file_path
 **`edit_table_cell`** — Replace the text in a specific table cell by block, row, and column index.
 ```
 file_path, block_index, row_index, col_index, new_text, track_changes?, author?
+```
+
+**`edit_table_cells`** — Replace text in multiple table cells in one operation. Cells can span different tables.
+```
+file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
 ```
 
 ### Footnotes
