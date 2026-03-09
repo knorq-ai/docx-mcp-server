@@ -564,6 +564,119 @@ export async function editParagraph(
 }
 
 // ---------------------------------------------------------------------------
+// 5b. edit_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+export interface EditParagraphItem {
+  paragraphIndex: number;
+  newText: string;
+}
+
+export async function editParagraphs(
+  filePath: string,
+  edits: EditParagraphItem[],
+  trackChanges: boolean = true,
+  author: string = "Claude",
+): Promise<string> {
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const body = getBody(parsed);
+    const bodyIdxs = blockBodyIndices(body);
+
+    // Validate all indices upfront
+    for (const edit of edits) {
+      if (edit.paragraphIndex < 0 || edit.paragraphIndex >= bodyIdxs.length) {
+        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${edit.paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
+      }
+      const element = body[bodyIdxs[edit.paragraphIndex]];
+      if (!element["w:p"]) {
+        throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${edit.paragraphIndex} is not a paragraph (it may be a table).`);
+      }
+    }
+
+    const ctx = trackChanges
+      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      : null;
+
+    for (const edit of edits) {
+      const bodyIdx = bodyIdxs[edit.paragraphIndex];
+      const element = body[bodyIdx];
+      const pChildren = element["w:p"] as XNode[];
+
+      const pPr = findOne(pChildren, "w:pPr");
+
+      // Collect structural elements
+      const structuralElements: XNode[] = [];
+      for (const child of pChildren) {
+        if (
+          child["w:bookmarkStart"] !== undefined ||
+          child["w:bookmarkEnd"] !== undefined ||
+          child["w:commentRangeStart"] !== undefined ||
+          child["w:commentRangeEnd"] !== undefined ||
+          child["w:commentReference"] !== undefined
+        ) {
+          structuralElements.push(child);
+        } else if (child["w:r"]) {
+          const runC = child["w:r"] as XNode[];
+          const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
+          if (hasDrawing) structuralElements.push(child);
+        }
+      }
+
+      if (ctx) {
+        let oldText = "";
+        let firstRPr: XNode | null = null;
+        for (const child of pChildren) {
+          if (child["w:r"]) {
+            const runC = child["w:r"] as XNode[];
+            const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
+            if (hasDrawing) continue;
+            const rPr = getRunRPr(runC);
+            if (!firstRPr && rPr) firstRPr = rPr;
+            oldText += extractRunText(runC);
+          } else if (child["w:ins"]) {
+            for (const insChild of child["w:ins"]) {
+              if (insChild["w:r"]) {
+                const runC = insChild["w:r"] as XNode[];
+                const rPr = getRunRPr(runC);
+                if (!firstRPr && rPr) firstRPr = rPr;
+                oldText += extractRunText(runC);
+              }
+            }
+          }
+        }
+
+        const diff = computeMinimalDiff(oldText, edit.newText);
+        const newChildren: XNode[] = [];
+        if (pPr) newChildren.push(pPr);
+        newChildren.push(...structuralElements);
+        if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
+        if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
+        if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
+        if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
+        element["w:p"] = newChildren;
+      } else {
+        const newRun = el("w:r", [
+          el("w:t", [textNode(edit.newText)], { "xml:space": "preserve" }),
+        ]);
+        const newChildren: XNode[] = [];
+        if (pPr) newChildren.push(pPr);
+        newChildren.push(...structuralElements);
+        newChildren.push(newRun);
+        element["w:p"] = newChildren;
+      }
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    const mode = trackChanges ? " (tracked)" : "";
+    return `Updated ${edits.length} paragraph(s) in ${path.basename(filePath)}${mode}.`;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 6. insert_paragraph
 // ---------------------------------------------------------------------------
 
@@ -664,6 +777,113 @@ export async function insertParagraph(
 
     const mode = trackChanges ? " (tracked)" : "";
     return `Inserted paragraph at position ${position} in ${path.basename(filePath)}${mode}.`;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 6b. insert_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+export interface InsertParagraphItem {
+  text: string;
+  position: number;
+  style?: string;
+}
+
+export async function insertParagraphs(
+  filePath: string,
+  items: InsertParagraphItem[],
+  trackChanges: boolean = true,
+  author: string = "Claude",
+): Promise<string> {
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const body = getBody(parsed);
+    const bodyIdxs = blockBodyIndices(body);
+
+    const ctx = trackChanges
+      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      : null;
+
+    // Sort by position descending so earlier inserts don't shift later ones
+    const sorted = [...items].sort((a, b) => {
+      // -1 (append) positions go last in the sorted order (process first since descending)
+      const posA = a.position < 0 || a.position >= bodyIdxs.length ? Infinity : a.position;
+      const posB = b.position < 0 || b.position >= bodyIdxs.length ? Infinity : b.position;
+      return posB - posA;
+    });
+
+    for (const item of sorted) {
+      const pChildren: XNode[] = [];
+
+      if (ctx) {
+        const rPrIns = el("w:ins", [], {
+          "w:id": String(allocRevId(ctx)),
+          "w:author": ctx.author,
+          "w:date": ctx.date,
+        });
+        if (item.style) {
+          pChildren.push(
+            el("w:pPr", [
+              el("w:pStyle", [], { "w:val": item.style }),
+              el("w:rPr", [rPrIns]),
+            ]),
+          );
+        } else {
+          pChildren.push(el("w:pPr", [el("w:rPr", [rPrIns])]));
+        }
+
+        const insRuns: XNode[] = [];
+        const lines = item.text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (i > 0) insRuns.push(el("w:r", [el("w:br")]));
+          if (lines[i]) {
+            insRuns.push(
+              el("w:r", [
+                el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
+              ]),
+            );
+          }
+        }
+        pChildren.push(wrapInIns(insRuns, ctx));
+      } else {
+        if (item.style) {
+          pChildren.push(el("w:pPr", [el("w:pStyle", [], { "w:val": item.style })]));
+        }
+        const lines = item.text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (i > 0) pChildren.push(el("w:r", [el("w:br")]));
+          if (lines[i]) {
+            pChildren.push(
+              el("w:r", [
+                el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
+              ]),
+            );
+          }
+        }
+      }
+
+      const newPara = el("w:p", pChildren);
+
+      if (item.position < 0 || item.position >= bodyIdxs.length) {
+        const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
+        if (sectPrIdx !== -1) {
+          body.splice(sectPrIdx, 0, newPara);
+        } else {
+          body.push(newPara);
+        }
+      } else {
+        const bodyIdx = bodyIdxs[item.position];
+        body.splice(bodyIdx, 0, newPara);
+      }
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    const mode = trackChanges ? " (tracked)" : "";
+    return `Inserted ${items.length} paragraph(s) in ${path.basename(filePath)}${mode}.`;
   });
 }
 
@@ -1787,6 +2007,81 @@ export async function setHeading(
 }
 
 // ---------------------------------------------------------------------------
+// 16b. set_heading_bulk
+// ---------------------------------------------------------------------------
+
+export interface SetHeadingItem {
+  paragraphIndex: number;
+  level: number;
+}
+
+export async function setHeadingBulk(
+  filePath: string,
+  items: SetHeadingItem[],
+): Promise<string> {
+  // Validate levels upfront (before acquiring file lock)
+  for (const item of items) {
+    if (item.level < 1 || item.level > 9) {
+      throw new EngineError(ErrorCode.INVALID_PARAMETER, `Heading level must be between 1 and 9. Got: ${item.level}.`);
+    }
+  }
+
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const body = getBody(parsed);
+    const bodyIdxs = blockBodyIndices(body);
+
+    // Validate all indices upfront
+    for (const item of items) {
+      if (item.paragraphIndex < 0 || item.paragraphIndex >= bodyIdxs.length) {
+        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${item.paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
+      }
+      const element = body[bodyIdxs[item.paragraphIndex]];
+      if (!element["w:p"]) {
+        throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${item.paragraphIndex} is not a paragraph.`);
+      }
+    }
+
+    // Apply headings
+    for (const item of items) {
+      const bodyIdx = bodyIdxs[item.paragraphIndex];
+      const element = body[bodyIdx];
+      const pChildren = element["w:p"] as XNode[];
+
+      let pPr = findOne(pChildren, "w:pPr");
+      if (!pPr) {
+        pPr = el("w:pPr");
+        pChildren.unshift(pPr);
+      }
+
+      const props = pPr["w:pPr"] as XNode[];
+      const styleId = `Heading${item.level}`;
+      const pStyleIdx = props.findIndex((n: XNode) => n["w:pStyle"] !== undefined);
+      const pStyleEl = el("w:pStyle", [], { "w:val": styleId });
+      if (pStyleIdx !== -1) {
+        props[pStyleIdx] = pStyleEl;
+      } else {
+        props.unshift(pStyleEl);
+      }
+
+      const olvlIdx = props.findIndex((n: XNode) => n["w:outlineLvl"] !== undefined);
+      const olvlEl = el("w:outlineLvl", [], { "w:val": String(item.level - 1) });
+      if (olvlIdx !== -1) {
+        props[olvlIdx] = olvlEl;
+      } else {
+        props.push(olvlEl);
+      }
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    return `Set ${items.length} paragraph(s) to headings in ${path.basename(filePath)}.`;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 17. get_page_layout
 // ---------------------------------------------------------------------------
 
@@ -2129,6 +2424,108 @@ export async function editTableCell(
 
     const mode = trackChanges ? " (tracked)" : "";
     return `Updated cell [${rowIndex},${colIndex}] in table at block ${blockIndex}${mode}.`;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 22b. edit_table_cells (bulk)
+// ---------------------------------------------------------------------------
+
+export interface EditTableCellItem {
+  blockIndex: number;
+  rowIndex: number;
+  colIndex: number;
+  newText: string;
+}
+
+export async function editTableCells(
+  filePath: string,
+  edits: EditTableCellItem[],
+  trackChanges: boolean = true,
+  author: string = "Claude",
+): Promise<string> {
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const body = getBody(parsed);
+    const bodyIdxs = blockBodyIndices(body);
+
+    // Validate all cells upfront
+    for (const edit of edits) {
+      if (edit.blockIndex < 0 || edit.blockIndex >= bodyIdxs.length) {
+        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${edit.blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
+      }
+      const element = body[bodyIdxs[edit.blockIndex]];
+      if (!element["w:tbl"]) {
+        throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${edit.blockIndex} is not a table.`);
+      }
+      const tblChildren = element["w:tbl"] as XNode[];
+      const rows = findAll(tblChildren, "w:tr");
+      if (edit.rowIndex < 0 || edit.rowIndex >= rows.length) {
+        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${edit.rowIndex} out of range (0–${rows.length - 1}) in table at block ${edit.blockIndex}.`);
+      }
+      const row = rows[edit.rowIndex];
+      const cells = findAll(row["w:tr"], "w:tc");
+      if (edit.colIndex < 0 || edit.colIndex >= cells.length) {
+        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${edit.colIndex} out of range (0–${cells.length - 1}) in table at block ${edit.blockIndex}, row ${edit.rowIndex}.`);
+      }
+    }
+
+    const ctx = trackChanges
+      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      : null;
+
+    for (const edit of edits) {
+      const bodyIdx = bodyIdxs[edit.blockIndex];
+      const element = body[bodyIdx];
+      const tblChildren = element["w:tbl"] as XNode[];
+      const rows = findAll(tblChildren, "w:tr");
+      const row = rows[edit.rowIndex];
+      const cells = findAll(row["w:tr"], "w:tc");
+      const cell = cells[edit.colIndex];
+      const cellChildren = cell["w:tc"] as XNode[];
+      const paraEl = cellChildren.find((c: XNode) => c["w:p"]);
+      if (!paraEl) continue;
+
+      const pChildren = paraEl["w:p"] as XNode[];
+      const pPr = findOne(pChildren, "w:pPr");
+
+      if (ctx) {
+        let oldText = "";
+        let firstRPr: XNode | null = null;
+        for (const child of pChildren) {
+          if (child["w:r"]) {
+            const runC = child["w:r"] as XNode[];
+            const rPr = getRunRPr(runC);
+            if (!firstRPr && rPr) firstRPr = rPr;
+            oldText += extractRunText(runC);
+          }
+        }
+
+        const diff = computeMinimalDiff(oldText, edit.newText);
+        const newChildren: XNode[] = [];
+        if (pPr) newChildren.push(pPr);
+        if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
+        if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
+        if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
+        if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
+        paraEl["w:p"] = newChildren;
+      } else {
+        const newRun = el("w:r", [
+          el("w:t", [textNode(edit.newText)], { "xml:space": "preserve" }),
+        ]);
+        const newChildren: XNode[] = [];
+        if (pPr) newChildren.push(pPr);
+        newChildren.push(newRun);
+        paraEl["w:p"] = newChildren;
+      }
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    const mode = trackChanges ? " (tracked)" : "";
+    return `Updated ${edits.length} table cell(s) in ${path.basename(filePath)}${mode}.`;
   });
 }
 

@@ -18,7 +18,9 @@ import {
   searchText,
   replaceText,
   editParagraph,
+  editParagraphs,
   insertParagraph,
+  insertParagraphs,
   deleteParagraph,
   deleteParagraphs,
   formatText,
@@ -33,12 +35,14 @@ import {
   highlightText,
   insertTable,
   setHeading,
+  setHeadingBulk,
   getPageLayout,
   setPageLayout,
   acceptAllChanges,
   rejectAllChanges,
   readHeaderFooter,
   editTableCell,
+  editTableCells,
   readFootnotes,
   listImages,
   EngineError,
@@ -259,6 +263,60 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: edit_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "edit_paragraphs",
+  "Replace the text content of multiple paragraphs in one operation. Opens and saves the file only once. Paragraph indices remain stable because edits don't change paragraph count.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    edits: z
+      .array(
+        z.object({
+          paragraph_index: z
+            .number()
+            .describe("Index of the paragraph to edit"),
+          new_text: z.string().describe("New text content for the paragraph"),
+        }),
+      )
+      .describe("Array of paragraph edits"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe(
+        "Record edits as tracked changes (w:del/w:ins). Default true.",
+      ),
+    author: z
+      .string()
+      .optional()
+      .default("Claude")
+      .describe("Author name for tracked changes"),
+  },
+  async ({ file_path, edits, track_changes, author }) => {
+    try {
+      const engineEdits = edits.map((e) => ({
+        paragraphIndex: e.paragraph_index,
+        newText: e.new_text,
+      }));
+      const result = await editParagraphs(
+        file_path,
+        engineEdits,
+        track_changes,
+        author,
+      );
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Tool: insert_paragraph
 // ---------------------------------------------------------------------------
 
@@ -295,6 +353,58 @@ server.tool(
         text,
         position,
         style,
+        track_changes,
+        author,
+      );
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: insert_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "insert_paragraphs",
+  "Insert multiple paragraphs in one operation. Handles index shifting internally by processing in reverse order. Opens and saves the file only once.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    paragraphs: z
+      .array(
+        z.object({
+          text: z.string().describe("Text content of the new paragraph"),
+          position: z
+            .number()
+            .describe("Block index to insert before (-1 for end of document)"),
+          style: z
+            .string()
+            .optional()
+            .describe("Paragraph style (e.g., 'Heading1', 'Normal')"),
+        }),
+      )
+      .describe("Array of paragraphs to insert"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record insertions as tracked changes. Default true."),
+    author: z
+      .string()
+      .optional()
+      .default("Claude")
+      .describe("Author name for tracked changes"),
+  },
+  async ({ file_path, paragraphs, track_changes, author }) => {
+    try {
+      const result = await insertParagraphs(
+        file_path,
+        paragraphs,
         track_changes,
         author,
       );
@@ -906,6 +1016,43 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: set_heading_bulk
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "set_heading_bulk",
+  "Convert multiple paragraphs to headings in one operation. Opens and saves the file only once.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    headings: z
+      .array(
+        z.object({
+          paragraph_index: z
+            .number()
+            .describe("Index of the paragraph to convert"),
+          level: z.number().min(1).max(9).describe("Heading level (1–9)"),
+        }),
+      )
+      .describe("Array of heading assignments"),
+  },
+  async ({ file_path, headings }) => {
+    try {
+      const engineItems = headings.map((h) => ({
+        paragraphIndex: h.paragraph_index,
+        level: h.level,
+      }));
+      const result = await setHeadingBulk(file_path, engineItems);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Tool: accept_all_changes
 // ---------------------------------------------------------------------------
 
@@ -1112,6 +1259,62 @@ server.tool(
         row_index,
         col_index,
         new_text,
+        track_changes,
+        author,
+      );
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: edit_table_cells (bulk)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "edit_table_cells",
+  "Replace the text content of multiple table cells in one operation. Cells can span different tables. Opens and saves the file only once.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    edits: z
+      .array(
+        z.object({
+          block_index: z
+            .number()
+            .describe("Index of the table block"),
+          row_index: z.number().describe("Zero-based row index"),
+          col_index: z.number().describe("Zero-based column index"),
+          new_text: z.string().describe("New text content for the cell"),
+        }),
+      )
+      .describe("Array of cell edits"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record edits as tracked changes. Default true."),
+    author: z
+      .string()
+      .optional()
+      .default("Claude")
+      .describe("Author name for tracked changes"),
+  },
+  async ({ file_path, edits, track_changes, author }) => {
+    try {
+      const engineEdits = edits.map((e) => ({
+        blockIndex: e.block_index,
+        rowIndex: e.row_index,
+        colIndex: e.col_index,
+        newText: e.new_text,
+      }));
+      const result = await editTableCells(
+        file_path,
+        engineEdits,
         track_changes,
         author,
       );
