@@ -1,0 +1,817 @@
+/**
+ * Text extraction, block enumeration, cross-run replacement, and track changes helpers.
+ */
+
+import {
+  type XNode,
+  tagName,
+  attr,
+  findAll,
+  findOne,
+  el,
+  textNode,
+  cloneNode,
+} from "./xml-helpers.js";
+
+// ---------------------------------------------------------------------------
+// Text extraction
+// ---------------------------------------------------------------------------
+
+/** Extract text from a single run's children (w:t, w:tab, w:br). */
+export function extractRunText(runChildren: XNode[]): string {
+  let text = "";
+  for (const rc of runChildren) {
+    if (rc["w:t"]) {
+      for (const tn of rc["w:t"]) {
+        if (tn["#text"] !== undefined) text += String(tn["#text"]);
+      }
+    } else if (rc["w:tab"]) {
+      text += "\t";
+    } else if (rc["w:br"]) {
+      text += "\n";
+    }
+  }
+  return text;
+}
+
+/** Extract w:delText from a run (deleted text in track changes). */
+function extractDelRunText(runChildren: XNode[]): string {
+  let text = "";
+  for (const rc of runChildren) {
+    if (rc["w:delText"]) {
+      for (const tn of rc["w:delText"]) {
+        if (tn["#text"] !== undefined) text += String(tn["#text"]);
+      }
+    }
+  }
+  return text;
+}
+
+/**
+ * Extract paragraph text.
+ * - Default (showRevisions=false): "accepted" view — includes original + inserted text, skips deleted.
+ * - showRevisions=true: annotates changes like [-deleted-][+inserted+].
+ */
+export function extractParagraphText(
+  pChildren: XNode[],
+  showRevisions: boolean = false,
+): string {
+  let text = "";
+  for (const child of pChildren) {
+    if (child["w:r"]) {
+      text += extractRunText(child["w:r"]);
+    } else if (child["w:hyperlink"]) {
+      for (const hlChild of child["w:hyperlink"]) {
+        if (hlChild["w:r"]) {
+          text += extractRunText(hlChild["w:r"]);
+        }
+      }
+    } else if (child["w:ins"]) {
+      // Tracked insertions
+      let insText = "";
+      for (const insChild of child["w:ins"]) {
+        if (insChild["w:r"]) {
+          insText += extractRunText(insChild["w:r"]);
+        }
+      }
+      text += showRevisions && insText ? `[+${insText}+]` : insText;
+    } else if (child["w:del"]) {
+      // Tracked deletions — only show if revisions requested
+      if (showRevisions) {
+        let delText = "";
+        for (const delChild of child["w:del"]) {
+          if (delChild["w:r"]) {
+            delText += extractDelRunText(delChild["w:r"]);
+          }
+        }
+        if (delText) text += `[-${delText}-]`;
+      }
+      // In default mode: skip deleted text entirely (accepted view)
+    }
+  }
+  return text;
+}
+
+export function extractCellText(cellChildren: XNode[], showRevisions: boolean): string {
+  const parts: string[] = [];
+  for (const child of cellChildren) {
+    if (child["w:p"]) {
+      parts.push(extractParagraphText(child["w:p"], showRevisions));
+    } else if (child["w:tbl"]) {
+      // Nested table — include its text too
+      parts.push(extractTableText(child["w:tbl"], showRevisions));
+    }
+  }
+  return parts.join("\\n");
+}
+
+export function extractTableText(
+  tblChildren: XNode[],
+  showRevisions: boolean = false,
+): string {
+  const rows = findAll(tblChildren, "w:tr");
+  if (rows.length === 0) return "[TABLE (empty)]";
+
+  let out = "[TABLE]\n";
+  for (const row of rows) {
+    const cells = findAll(row["w:tr"], "w:tc");
+    const cellTexts = cells.map((cell) =>
+      extractCellText(cell["w:tc"], showRevisions)
+    );
+    out += "| " + cellTexts.join(" | ") + " |\n";
+  }
+  out += "[/TABLE]";
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Style / heading detection
+// ---------------------------------------------------------------------------
+
+export function getParagraphStyle(pChildren: XNode[]): string | undefined {
+  const pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) return undefined;
+  const pStyle = findOne(pPr["w:pPr"], "w:pStyle");
+  if (!pStyle) return undefined;
+  return attr(pStyle, "w:val");
+}
+
+export function getHeadingLevel(style: string | undefined): number | undefined {
+  if (!style) return undefined;
+  const m = style.match(/^[Hh]eading(\d)$/);
+  return m ? parseInt(m[1]) : undefined;
+}
+
+function getParagraphAlignment(pChildren: XNode[]): string | undefined {
+  const pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) return undefined;
+  const jc = findOne(pPr["w:pPr"], "w:jc");
+  if (!jc) return undefined;
+  return attr(jc, "w:val");
+}
+
+// ---------------------------------------------------------------------------
+// Paragraph enumeration (including tables as blocks)
+// ---------------------------------------------------------------------------
+
+export interface BlockInfo {
+  index: number;
+  type: "paragraph" | "table";
+  text: string;
+  style?: string;
+  alignment?: string;
+  headingLevel?: number;
+}
+
+export function enumerateBlocks(
+  body: XNode[],
+  showRevisions: boolean = false,
+): BlockInfo[] {
+  const blocks: BlockInfo[] = [];
+  let idx = 0;
+  for (const child of body) {
+    if (child["w:p"]) {
+      const pChildren = child["w:p"];
+      const text = extractParagraphText(pChildren, showRevisions);
+      const style = getParagraphStyle(pChildren);
+      const alignment = getParagraphAlignment(pChildren);
+      const hl = getHeadingLevel(style);
+      blocks.push({
+        index: idx,
+        type: "paragraph",
+        text,
+        style,
+        alignment,
+        headingLevel: hl,
+      });
+      idx++;
+    } else if (child["w:tbl"]) {
+      blocks.push({
+        index: idx,
+        type: "table",
+        text: extractTableText(child["w:tbl"], showRevisions),
+        style: "Table",
+      });
+      idx++;
+    } else if (child["w:sdt"]) {
+      // Content controls — extract paragraphs from w:sdtContent
+      const sdtChildren = child["w:sdt"] as XNode[];
+      const sdtContent = findOne(sdtChildren, "w:sdtContent");
+      if (sdtContent) {
+        const contentChildren = sdtContent["w:sdtContent"] as XNode[];
+        for (const contentChild of contentChildren) {
+          if (contentChild["w:p"]) {
+            const pChildren = contentChild["w:p"];
+            const text = extractParagraphText(pChildren, showRevisions);
+            const style = getParagraphStyle(pChildren);
+            const alignment = getParagraphAlignment(pChildren);
+            const hl = getHeadingLevel(style);
+            blocks.push({
+              index: idx,
+              type: "paragraph",
+              text,
+              style,
+              alignment,
+              headingLevel: hl,
+            });
+            idx++;
+          }
+        }
+      }
+    }
+    // Skip sectPr and other non-content elements for block counting
+  }
+  return blocks;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-run text replacement
+// ---------------------------------------------------------------------------
+
+interface RunInfo {
+  node: XNode; // The w:r element in the parent array
+  textNodes: XNode[]; // The w:t > #text nodes
+  text: string;
+  startOffset: number; // Character offset within the paragraph
+}
+
+function collectRuns(pChildren: XNode[]): RunInfo[] {
+  const runs: RunInfo[] = [];
+  let offset = 0;
+  for (const child of pChildren) {
+    if (child["w:r"]) {
+      const runC = child["w:r"];
+      const textNodes: XNode[] = [];
+      let runText = "";
+      for (const rc of runC) {
+        if (rc["w:t"]) {
+          for (const tn of rc["w:t"]) {
+            if (tn["#text"] !== undefined) {
+              textNodes.push(tn);
+              runText += String(tn["#text"]);
+            }
+          }
+        }
+      }
+      if (textNodes.length > 0) {
+        runs.push({ node: child, textNodes, text: runText, startOffset: offset });
+      }
+      offset += runText.length;
+    } else if (child["w:ins"]) {
+      // Include runs inside w:ins tracked insertions
+      const insChildren = child["w:ins"] as XNode[];
+      for (const insChild of insChildren) {
+        if (insChild["w:r"]) {
+          const runC = insChild["w:r"] as XNode[];
+          const textNodes: XNode[] = [];
+          let runText = "";
+          for (const rc of runC) {
+            if (rc["w:t"]) {
+              for (const tn of rc["w:t"]) {
+                if (tn["#text"] !== undefined) {
+                  textNodes.push(tn);
+                  runText += String(tn["#text"]);
+                }
+              }
+            }
+          }
+          if (textNodes.length > 0) {
+            runs.push({ node: insChild, textNodes, text: runText, startOffset: offset });
+          }
+          offset += runText.length;
+        }
+      }
+    } else {
+      // Skip non-run elements (pPr, hyperlinks, etc.) for replacement
+    }
+  }
+  return runs;
+}
+
+/**
+ * Replace `search` with `replace` inside the runs of a single paragraph.
+ * Handles cross-run matches. Returns number of replacements made.
+ */
+export function replaceInParagraph(
+  pChildren: XNode[],
+  search: string,
+  replace: string,
+  caseSensitive: boolean,
+): number {
+  const runs = collectRuns(pChildren);
+  if (runs.length === 0) return 0;
+
+  const fullText = runs.map((r) => r.text).join("");
+  const searchStr = caseSensitive ? search : search.toLowerCase();
+  const compareText = caseSensitive ? fullText : fullText.toLowerCase();
+
+  // Find all match positions
+  const matches: number[] = [];
+  let pos = 0;
+  while (true) {
+    const idx = compareText.indexOf(searchStr, pos);
+    if (idx === -1) break;
+    matches.push(idx);
+    pos = idx + searchStr.length;
+  }
+  if (matches.length === 0) return 0;
+
+  // Process matches in reverse order to maintain offsets
+  for (let mi = matches.length - 1; mi >= 0; mi--) {
+    const matchStart = matches[mi];
+    const matchEnd = matchStart + search.length;
+
+    // Find which runs are affected
+    let firstRunIdx = -1;
+    let lastRunIdx = -1;
+    for (let ri = 0; ri < runs.length; ri++) {
+      const rStart = runs[ri].startOffset;
+      const rEnd = rStart + runs[ri].text.length;
+      if (rStart < matchEnd && rEnd > matchStart) {
+        if (firstRunIdx === -1) firstRunIdx = ri;
+        lastRunIdx = ri;
+      }
+    }
+    if (firstRunIdx === -1) continue;
+
+    if (firstRunIdx === lastRunIdx) {
+      // Single run — simple replacement
+      const run = runs[firstRunIdx];
+      const localStart = matchStart - run.startOffset;
+      const newText =
+        run.text.substring(0, localStart) +
+        replace +
+        run.text.substring(localStart + search.length);
+      // Update the text node(s) — put all text in first text node
+      run.textNodes[0]["#text"] = newText;
+      for (let ti = 1; ti < run.textNodes.length; ti++) {
+        run.textNodes[ti]["#text"] = "";
+      }
+      run.text = newText;
+    } else {
+      // Cross-run replacement
+      // Put replacement in first run, clear matched portion from others
+      const firstRun = runs[firstRunIdx];
+      const localStart = matchStart - firstRun.startOffset;
+      const firstRunNewText =
+        firstRun.text.substring(0, localStart) + replace;
+      firstRun.textNodes[0]["#text"] = firstRunNewText;
+      for (let ti = 1; ti < firstRun.textNodes.length; ti++) {
+        firstRun.textNodes[ti]["#text"] = "";
+      }
+      firstRun.text = firstRunNewText;
+
+      for (let ri = firstRunIdx + 1; ri <= lastRunIdx; ri++) {
+        const run = runs[ri];
+        if (ri === lastRunIdx) {
+          // Last run — keep text after the match
+          const localEnd = matchEnd - run.startOffset;
+          const kept = run.text.substring(localEnd);
+          run.textNodes[0]["#text"] = kept;
+          for (let ti = 1; ti < run.textNodes.length; ti++) {
+            run.textNodes[ti]["#text"] = "";
+          }
+          run.text = kept;
+        } else {
+          // Middle runs — clear completely
+          for (const tn of run.textNodes) {
+            tn["#text"] = "";
+          }
+          run.text = "";
+        }
+      }
+    }
+  }
+
+  return matches.length;
+}
+
+// ---------------------------------------------------------------------------
+// Track changes helpers
+// ---------------------------------------------------------------------------
+
+export interface RevisionContext {
+  nextId: number;
+  author: string;
+  date: string;
+}
+
+export function newRevisionContext(startId: number, author: string): RevisionContext {
+  return { nextId: startId, author, date: new Date().toISOString() };
+}
+
+export function allocRevId(ctx: RevisionContext): number {
+  return ctx.nextId++;
+}
+
+/** Recursively scan parsed XML tree for the maximum w:id attribute value */
+export function scanMaxId(nodes: XNode[]): number {
+  let max = 0;
+  for (const node of nodes) {
+    const id = attr(node, "w:id");
+    if (id) {
+      const v = parseInt(id);
+      if (!isNaN(v) && v > max) max = v;
+    }
+    const t = tagName(node);
+    if (t && Array.isArray(node[t])) {
+      const childMax = scanMaxId(node[t]);
+      if (childMax > max) max = childMax;
+    }
+  }
+  return max;
+}
+
+export function getRunRPr(runChildren: XNode[]): XNode | null {
+  const rPr = findOne(runChildren, "w:rPr");
+  return rPr ? cloneNode(rPr) : null;
+}
+
+/** Create a normal w:r with w:t */
+export function makeTextRun(text: string, rPr: XNode | null): XNode {
+  const runC: XNode[] = [];
+  if (rPr) runC.push(cloneNode(rPr));
+  runC.push(el("w:t", [textNode(text)], { "xml:space": "preserve" }));
+  return el("w:r", runC);
+}
+
+/** Create a w:r with w:delText (for use inside w:del) */
+export function makeDelTextRun(text: string, rPr: XNode | null): XNode {
+  const runC: XNode[] = [];
+  if (rPr) runC.push(cloneNode(rPr));
+  runC.push(
+    el("w:delText", [textNode(text)], { "xml:space": "preserve" }),
+  );
+  return el("w:r", runC);
+}
+
+/** Wrap runs in a w:del revision element */
+export function wrapInDel(runs: XNode[], ctx: RevisionContext): XNode {
+  return el("w:del", runs, {
+    "w:id": String(allocRevId(ctx)),
+    "w:author": ctx.author,
+    "w:date": ctx.date,
+  });
+}
+
+/** Wrap runs in a w:ins revision element */
+export function wrapInIns(runs: XNode[], ctx: RevisionContext): XNode {
+  return el("w:ins", runs, {
+    "w:id": String(allocRevId(ctx)),
+    "w:author": ctx.author,
+    "w:date": ctx.date,
+  });
+}
+
+/**
+ * Find the common prefix and suffix between two strings, returning the minimal
+ * changed region. Used to produce word-level tracked-change diffs rather than
+ * whole-paragraph deletions.
+ */
+export function computeMinimalDiff(
+  oldText: string,
+  newText: string,
+): { prefix: string; oldMiddle: string; newMiddle: string; suffix: string } {
+  const oldLen = oldText.length;
+  const newLen = newText.length;
+  const minLen = Math.min(oldLen, newLen);
+
+  let prefixLen = 0;
+  while (prefixLen < minLen && oldText[prefixLen] === newText[prefixLen]) {
+    prefixLen++;
+  }
+
+  let suffixLen = 0;
+  const maxSuffix = minLen - prefixLen;
+  while (
+    suffixLen < maxSuffix &&
+    oldText[oldLen - 1 - suffixLen] === newText[newLen - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  return {
+    prefix: oldText.slice(0, prefixLen),
+    oldMiddle: oldText.slice(prefixLen, suffixLen > 0 ? oldLen - suffixLen : oldLen),
+    newMiddle: newText.slice(prefixLen, suffixLen > 0 ? newLen - suffixLen : newLen),
+    suffix: suffixLen > 0 ? oldText.slice(oldLen - suffixLen) : "",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tracked replacement (cross-run aware)
+// ---------------------------------------------------------------------------
+
+export interface RunWithIndex {
+  pIdx: number; // index in pChildren
+  runChildren: XNode[];
+  rPr: XNode | null;
+  text: string;
+  startOffset: number;
+}
+
+export function collectRunsWithIndices(pChildren: XNode[]): RunWithIndex[] {
+  const runs: RunWithIndex[] = [];
+  let offset = 0;
+  for (let i = 0; i < pChildren.length; i++) {
+    const child = pChildren[i];
+    if (child["w:r"]) {
+      const runC = child["w:r"] as XNode[];
+      let runText = "";
+      for (const rc of runC) {
+        if (rc["w:t"]) {
+          for (const tn of rc["w:t"]) {
+            if (tn["#text"] !== undefined) runText += String(tn["#text"]);
+          }
+        }
+      }
+      const rPr = getRunRPr(runC);
+      runs.push({
+        pIdx: i,
+        runChildren: runC,
+        rPr,
+        text: runText,
+        startOffset: offset,
+      });
+      offset += runText.length;
+    } else if (child["w:ins"]) {
+      // Include runs inside w:ins tracked insertions
+      const insChildren = child["w:ins"] as XNode[];
+      for (const insChild of insChildren) {
+        if (insChild["w:r"]) {
+          const runC = insChild["w:r"] as XNode[];
+          let runText = "";
+          for (const rc of runC) {
+            if (rc["w:t"]) {
+              for (const tn of rc["w:t"]) {
+                if (tn["#text"] !== undefined) runText += String(tn["#text"]);
+              }
+            }
+          }
+          const rPr = getRunRPr(runC);
+          // Use pIdx = i (the w:ins element index) so splice operations target the right element
+          runs.push({
+            pIdx: i,
+            runChildren: runC,
+            rPr,
+            text: runText,
+            startOffset: offset,
+          });
+          offset += runText.length;
+        }
+      }
+    }
+  }
+  return runs;
+}
+
+/**
+ * Replace `search` with `replace` using tracked changes markup.
+ * Old text is wrapped in <w:del> with <w:delText>, new text in <w:ins>.
+ * Handles cross-run matches. Returns number of replacements made.
+ */
+export function replaceInParagraphTracked(
+  pChildren: XNode[],
+  search: string,
+  replace: string,
+  caseSensitive: boolean,
+  ctx: RevisionContext,
+): number {
+  const runs = collectRunsWithIndices(pChildren);
+  if (runs.length === 0) return 0;
+
+  const fullText = runs.map((r) => r.text).join("");
+  const searchStr = caseSensitive ? search : search.toLowerCase();
+  const compareText = caseSensitive ? fullText : fullText.toLowerCase();
+
+  const matches: number[] = [];
+  let pos = 0;
+  while (true) {
+    const idx = compareText.indexOf(searchStr, pos);
+    if (idx === -1) break;
+    matches.push(idx);
+    pos = idx + searchStr.length;
+  }
+  if (matches.length === 0) return 0;
+
+  // Pre-compute minimal diff so only the changed characters appear in del/ins
+  const diff = computeMinimalDiff(search, replace);
+  const prefixLen = diff.prefix.length;
+  const suffixLen = diff.suffix.length;
+  const effectiveReplace = diff.newMiddle;
+
+  // Process in reverse order to preserve pChildren indices
+  for (let mi = matches.length - 1; mi >= 0; mi--) {
+    const matchStart = matches[mi];
+    const matchEnd = matchStart + search.length;
+
+    // Shrink del/ins boundaries to only the changed middle
+    const effectiveStart = matchStart + prefixLen;
+    const effectiveEnd = matchEnd - suffixLen;
+
+    // Nothing actually changed (identical strings) — skip
+    if (effectiveStart === effectiveEnd && !effectiveReplace) continue;
+
+    let firstRunIdx = -1;
+    let lastRunIdx = -1;
+    for (let ri = 0; ri < runs.length; ri++) {
+      const rStart = runs[ri].startOffset;
+      const rEnd = rStart + runs[ri].text.length;
+      if (rStart < effectiveEnd && rEnd > effectiveStart) {
+        if (firstRunIdx === -1) firstRunIdx = ri;
+        lastRunIdx = ri;
+      }
+    }
+    if (firstRunIdx === -1) continue;
+
+    const newNodes: XNode[] = [];
+    const delRuns: XNode[] = [];
+    const delLen = effectiveEnd - effectiveStart;
+
+    if (firstRunIdx === lastRunIdx) {
+      // Single-run match
+      const run = runs[firstRunIdx];
+      const localStart = effectiveStart - run.startOffset;
+      const beforeText = run.text.substring(0, localStart);
+      const matchedText = run.text.substring(localStart, localStart + delLen);
+      const afterText = run.text.substring(localStart + delLen);
+
+      if (beforeText) newNodes.push(makeTextRun(beforeText, run.rPr));
+      if (matchedText) {
+        delRuns.push(makeDelTextRun(matchedText, run.rPr));
+        newNodes.push(wrapInDel(delRuns, ctx));
+      }
+      if (effectiveReplace) {
+        newNodes.push(wrapInIns([makeTextRun(effectiveReplace, run.rPr)], ctx));
+      }
+      if (afterText) newNodes.push(makeTextRun(afterText, run.rPr));
+
+      pChildren.splice(run.pIdx, 1, ...newNodes);
+    } else {
+      // Cross-run match
+      for (let ri = firstRunIdx; ri <= lastRunIdx; ri++) {
+        const run = runs[ri];
+        if (ri === firstRunIdx) {
+          const localStart = effectiveStart - run.startOffset;
+          const beforeText = run.text.substring(0, localStart);
+          const matchedText = run.text.substring(localStart);
+          if (beforeText) newNodes.push(makeTextRun(beforeText, run.rPr));
+          delRuns.push(makeDelTextRun(matchedText, run.rPr));
+        } else if (ri === lastRunIdx) {
+          const localEnd = effectiveEnd - run.startOffset;
+          const matchedText = run.text.substring(0, localEnd);
+          delRuns.push(makeDelTextRun(matchedText, run.rPr));
+        } else {
+          delRuns.push(makeDelTextRun(run.text, run.rPr));
+        }
+      }
+
+      newNodes.push(wrapInDel(delRuns, ctx));
+      const firstRun = runs[firstRunIdx];
+      if (effectiveReplace) {
+        newNodes.push(
+          wrapInIns([makeTextRun(effectiveReplace, firstRun.rPr)], ctx),
+        );
+      }
+
+      const lastRun = runs[lastRunIdx];
+      const localEnd = effectiveEnd - lastRun.startOffset;
+      const afterText = lastRun.text.substring(localEnd);
+      if (afterText) newNodes.push(makeTextRun(afterText, lastRun.rPr));
+
+      const pIdxStart = runs[firstRunIdx].pIdx;
+      const pIdxEnd = runs[lastRunIdx].pIdx;
+      pChildren.splice(pIdxStart, pIdxEnd - pIdxStart + 1, ...newNodes);
+    }
+  }
+
+  return matches.length;
+}
+
+// ---------------------------------------------------------------------------
+// Accept / reject changes helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Accept all tracked changes: remove w:del elements entirely,
+ * unwrap w:ins so their runs become normal paragraph children.
+ */
+export function acceptChangesInNodes(nodes: XNode[]): void {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const node = nodes[i];
+    if (node["w:del"]) {
+      // Delete the entire w:del element (accept = remove deleted text)
+      nodes.splice(i, 1);
+    } else if (node["w:ins"]) {
+      // Unwrap: replace w:ins with its child runs
+      const insChildren = node["w:ins"] as XNode[];
+      const runs = insChildren.filter(
+        (c: XNode) => c["w:r"] !== undefined,
+      );
+      nodes.splice(i, 1, ...runs);
+    } else if (node["w:p"]) {
+      // Recurse into paragraphs
+      const pChildren = node["w:p"] as XNode[];
+      acceptChangesInNodes(pChildren);
+      // Remove pPr > rPr > w:del and w:ins markers
+      cleanParagraphRevisionMarkers(pChildren);
+    } else if (node["w:tbl"]) {
+      // Recurse into table cells
+      const rows = findAll(node["w:tbl"], "w:tr");
+      for (const row of rows) {
+        const cells = findAll(row["w:tr"], "w:tc");
+        for (const cell of cells) {
+          const paras = findAll(cell["w:tc"], "w:p");
+          for (const p of paras) {
+            acceptChangesInNodes(p["w:p"]);
+            cleanParagraphRevisionMarkers(p["w:p"]);
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Reject all tracked changes: remove w:ins elements entirely,
+ * unwrap w:del so their runs become normal (converting w:delText → w:t).
+ */
+export function rejectChangesInNodes(nodes: XNode[]): void {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const node = nodes[i];
+    if (node["w:ins"]) {
+      // Remove the entire w:ins element (reject = remove inserted text)
+      nodes.splice(i, 1);
+    } else if (node["w:del"]) {
+      // Unwrap: replace w:del with its child runs, converting delText → t
+      const delChildren = node["w:del"] as XNode[];
+      const runs: XNode[] = [];
+      for (const dc of delChildren) {
+        if (dc["w:r"]) {
+          const runC = dc["w:r"] as XNode[];
+          // Convert w:delText to w:t
+          for (const rc of runC) {
+            if (rc["w:delText"]) {
+              const text = rc["w:delText"];
+              delete rc["w:delText"];
+              rc["w:t"] = text;
+            }
+          }
+          runs.push(dc);
+        }
+      }
+      nodes.splice(i, 1, ...runs);
+    } else if (node["w:p"]) {
+      const pChildren = node["w:p"] as XNode[];
+      rejectChangesInNodes(pChildren);
+      cleanParagraphRevisionMarkers(pChildren);
+    } else if (node["w:tbl"]) {
+      const rows = findAll(node["w:tbl"], "w:tr");
+      for (const row of rows) {
+        const cells = findAll(row["w:tr"], "w:tc");
+        for (const cell of cells) {
+          const paras = findAll(cell["w:tc"], "w:p");
+          for (const p of paras) {
+            rejectChangesInNodes(p["w:p"]);
+            cleanParagraphRevisionMarkers(p["w:p"]);
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Remove w:ins and w:del markers from pPr > rPr (paragraph break markers). */
+function cleanParagraphRevisionMarkers(pChildren: XNode[]): void {
+  const pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) return;
+  const pPrChildren = pPr["w:pPr"] as XNode[];
+  const rPr = findOne(pPrChildren, "w:rPr");
+  if (!rPr) return;
+  const rPrChildren = rPr["w:rPr"] as XNode[];
+  for (let i = rPrChildren.length - 1; i >= 0; i--) {
+    if (rPrChildren[i]["w:ins"] !== undefined || rPrChildren[i]["w:del"] !== undefined) {
+      rPrChildren.splice(i, 1);
+    }
+  }
+  // Clean up empty rPr
+  if (rPrChildren.length === 0) {
+    const rPrIdx = pPrChildren.indexOf(rPr);
+    if (rPrIdx !== -1) pPrChildren.splice(rPrIdx, 1);
+  }
+}
+
+/** Extract text from all paragraphs in a parsed header/footer XML */
+export function extractTextFromHdrFtr(parsed: XNode[]): string {
+  const rootEl = parsed.find((n: XNode) => n["w:hdr"] || n["w:ftr"]);
+  if (!rootEl) return "";
+  const children = rootEl["w:hdr"] ?? rootEl["w:ftr"];
+  const lines: string[] = [];
+  for (const child of children) {
+    if (child["w:p"]) {
+      const text = extractParagraphText(child["w:p"]);
+      if (text.trim()) lines.push(text);
+    }
+  }
+  return lines.join("\n");
+}

@@ -1,0 +1,56 @@
+{
+  "name": "docx-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for DOCX document editing — read, edit, format, comment, highlight, and track changes in Word documents",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "docx-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "docx",
+    "word",
+    "document",
+    "editor",
+    "track-changes",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ym259/wscode.git",
+    "directory": "mcp-server"
+  },
+  "homepage": "https://github.com/ym259/wscode/tree/main/mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/ym259/wscode/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "fast-xml-parser": "^5.3.3",
+    "jszip": "^3.10.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.18"
+  }
+}
