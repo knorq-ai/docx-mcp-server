@@ -4,6 +4,7 @@ import {
   cleanupTmpFiles,
   readRawDocXml,
   createCrossRunDoc,
+  createDocWithInlineSdt,
 } from "./helpers.js";
 import {
   readDocument,
@@ -128,6 +129,47 @@ describe("replaceText (tracked)", () => {
     const result = await readDocument(p, undefined, undefined, true);
     expect(result).toContain("[-change-]");
     expect(result).toContain("[+modification+]");
+  });
+});
+
+// =========================================================================
+// replaceText — inline SDT (Google Docs export pattern)
+// =========================================================================
+
+describe("replaceText with inline w:sdt", () => {
+  it("reads text from inline SDT", async () => {
+    const p = await createDocWithInlineSdt("Hello SDT world");
+    const doc = await readDocument(p);
+    expect(doc).toContain("Hello SDT world");
+  });
+
+  it("replaces text inside inline SDT (untracked)", async () => {
+    const p = await createDocWithInlineSdt("Hello SDT world");
+    const result = await replaceText(p, "SDT", "replaced", false, false);
+    expect(result).toContain("1 occurrence");
+    const doc = await readDocument(p);
+    expect(doc).toContain("Hello replaced world");
+  });
+
+  it("replaces text inside inline SDT (tracked)", async () => {
+    const p = await createDocWithInlineSdt("Hello SDT world");
+    await replaceText(p, "SDT", "tracked", false, true, "TestAuthor");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:del");
+    expect(xml).toContain("w:ins");
+    // SDT wrapper should still be present
+    expect(xml).toContain("w:sdtContent");
+    const doc = await readDocument(p);
+    expect(doc).toContain("Hello tracked world");
+  });
+
+  it("tracked replacement preserves SDT structure", async () => {
+    const p = await createDocWithInlineSdt("Replace me here");
+    await replaceText(p, "me", "you", false, true);
+    const xml = await readRawDocXml(p);
+    // sdtPr with tag should still exist
+    expect(xml).toContain("goog_rdk_0");
+    expect(xml).toContain("w:sdtPr");
   });
 });
 

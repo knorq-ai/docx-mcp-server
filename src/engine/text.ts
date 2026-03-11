@@ -528,10 +528,9 @@ export interface RunWithIndex {
 export function collectRunsWithIndices(pChildren: XNode[]): RunWithIndex[] {
   const runs: RunWithIndex[] = [];
   let offset = 0;
-  // NOTE: w:sdt is intentionally NOT traversed here. replaceInParagraphTracked
-  // splices pChildren by pIdx, which would destroy the SDT wrapper structure.
-  // SDT text is still readable via extractParagraphText and replaceable via
-  // the non-tracked collectRuns path which mutates text nodes in place.
+  // NOTE: w:sdt is NOT traversed here because splice operations use pIdx
+  // directly on the children array. SDT content is handled separately by
+  // replaceInParagraphTracked which recurses into each SDT's sdtContent.
   for (let i = 0; i < pChildren.length; i++) {
     const child = pChildren[i];
     if (child["w:r"]) {
@@ -596,7 +595,32 @@ export function replaceInParagraphTracked(
   caseSensitive: boolean,
   ctx: RevisionContext,
 ): number {
-  const runs = collectRunsWithIndices(pChildren);
+  let count = replaceInChildrenTracked(pChildren, search, replace, caseSensitive, ctx);
+
+  // Recurse into w:sdt elements — each SDT's sdtContent is an independent splice scope
+  for (const child of pChildren) {
+    if (child["w:sdt"]) {
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) {
+        count += replaceInChildrenTracked(
+          sdtContent["w:sdtContent"] as XNode[], search, replace, caseSensitive, ctx,
+        );
+      }
+    }
+  }
+
+  return count;
+}
+
+/** Core tracked replacement on a flat children array (no SDT traversal). */
+function replaceInChildrenTracked(
+  children: XNode[],
+  search: string,
+  replace: string,
+  caseSensitive: boolean,
+  ctx: RevisionContext,
+): number {
+  const runs = collectRunsWithIndices(children);
   if (runs.length === 0) return 0;
 
   const fullText = runs.map((r) => r.text).join("");
@@ -619,7 +643,7 @@ export function replaceInParagraphTracked(
   const suffixLen = diff.suffix.length;
   const effectiveReplace = diff.newMiddle;
 
-  // Process in reverse order to preserve pChildren indices
+  // Process in reverse order to preserve children indices
   for (let mi = matches.length - 1; mi >= 0; mi--) {
     const matchStart = matches[mi];
     const matchEnd = matchStart + search.length;
@@ -665,7 +689,7 @@ export function replaceInParagraphTracked(
       }
       if (afterText) newNodes.push(makeTextRun(afterText, run.rPr));
 
-      pChildren.splice(run.pIdx, 1, ...newNodes);
+      children.splice(run.pIdx, 1, ...newNodes);
     } else {
       // Cross-run match
       for (let ri = firstRunIdx; ri <= lastRunIdx; ri++) {
@@ -700,7 +724,7 @@ export function replaceInParagraphTracked(
 
       const pIdxStart = runs[firstRunIdx].pIdx;
       const pIdxEnd = runs[lastRunIdx].pIdx;
-      pChildren.splice(pIdxStart, pIdxEnd - pIdxStart + 1, ...newNodes);
+      children.splice(pIdxStart, pIdxEnd - pIdxStart + 1, ...newNodes);
     }
   }
 

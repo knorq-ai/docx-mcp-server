@@ -519,6 +519,35 @@ export async function createDocWithEmbeddedImage(
   return p;
 }
 
+/**
+ * Create a doc where text inside a paragraph is wrapped in w:sdt > w:sdtContent > w:r
+ * (Google Docs export pattern: inline SDT within paragraph children).
+ */
+export async function createDocWithInlineSdt(
+  sdtText: string,
+  tagName: string = "goog_rdk_0",
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:sdt>
+    <w:sdtPr><w:tag w:val="${escapeXml(tagName)}"/></w:sdtPr>
+    <w:sdtContent>
+      <w:r><w:t xml:space="preserve">${escapeXml(sdtText)}</w:t></w:r>
+    </w:sdtContent>
+  </w:sdt>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
 async function writeMinimalDocx(filePath: string, documentXml: string): Promise<void> {
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
