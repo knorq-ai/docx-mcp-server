@@ -1355,9 +1355,9 @@ export async function readCommentsStructured(
     for (const c of rawComments) {
       const id = attr(c, "w:id") ?? "?";
       const cChildren = c["w:comment"] ?? [];
-      const firstPara = findOne(cChildren, "w:p");
-      if (firstPara) {
-        const pId = attr(firstPara, "w14:paraId");
+      // Map ALL paragraph paraIds (commentsExtended may reference any paragraph, typically the last)
+      for (const p of findAll(cChildren, "w:p")) {
+        const pId = attr(p, "w14:paraId");
         if (pId) {
           paraIdToCommentId.set(pId, id);
         }
@@ -1444,18 +1444,17 @@ export async function replyToComment(
       throw new EngineError(ErrorCode.INVALID_PARAMETER, `Comment ID ${parentCommentId} not found.`);
     }
 
-    // Ensure parent's first <w:p> has w14:paraId
+    // Use last <w:p>'s w14:paraId (commentsExtended convention uses the last paragraph)
     const parentChildren = parentComment["w:comment"] ?? [];
-    const parentFirstPara = findOne(parentChildren, "w:p");
-    let parentParaId: string;
-    if (parentFirstPara) {
-      parentParaId = attr(parentFirstPara, "w14:paraId") ?? "";
-      if (!parentParaId) {
-        parentParaId = generateParaId();
-        setAttr(parentFirstPara, "w14:paraId", parentParaId);
-      }
-    } else {
+    const parentParas = findAll(parentChildren, "w:p");
+    if (parentParas.length === 0) {
       throw new EngineError(ErrorCode.INVALID_PARAMETER, `Parent comment ${parentCommentId} has no paragraphs.`);
+    }
+    const parentLastPara = parentParas[parentParas.length - 1];
+    let parentParaId = attr(parentLastPara, "w14:paraId") ?? "";
+    if (!parentParaId) {
+      parentParaId = generateParaId();
+      setAttr(parentLastPara, "w14:paraId", parentParaId);
     }
 
     // Create reply comment
@@ -1470,8 +1469,8 @@ export async function replyToComment(
           el("w:t", [textNode(escapeXml(line))], { "xml:space": "preserve" }),
         ]),
       ]);
-      // Set paraId on first paragraph for threading
-      if (idx === 0) {
+      // Set paraId on last paragraph for threading (commentsExtended convention)
+      if (idx === lines.length - 1) {
         setAttr(para, "w14:paraId", replyParaId);
       }
       return para;
@@ -1552,9 +1551,9 @@ export async function deleteComment(
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
 
-    // Remove from comments.xml — capture the deleted comment's paraId first
+    // Remove from comments.xml — capture ALL paraIds before removing
     const commentsParsed = await parseCommentsXml(handle);
-    let deletedParaId: string | undefined;
+    const deletedParaIds = new Set<string>();
     if (commentsParsed.length > 0) {
       const commentsChildren = getCommentsArray(commentsParsed);
       const idx = commentsChildren.findIndex(
@@ -1562,11 +1561,11 @@ export async function deleteComment(
           c["w:comment"] !== undefined && attr(c, "w:id") === String(commentId),
       );
       if (idx !== -1) {
-        // Extract paraId from first paragraph before removing
+        // Extract all paraIds from all paragraphs before removing
         const cChildren = commentsChildren[idx]["w:comment"] ?? [];
-        const firstPara = findOne(cChildren, "w:p");
-        if (firstPara) {
-          deletedParaId = attr(firstPara, "w14:paraId");
+        for (const p of findAll(cChildren, "w:p")) {
+          const pId = attr(p, "w14:paraId");
+          if (pId) deletedParaIds.add(pId);
         }
         commentsChildren.splice(idx, 1);
         const commentsXml = builder.build(commentsParsed);
@@ -1575,7 +1574,7 @@ export async function deleteComment(
     }
 
     // Remove corresponding entries from commentsExtended.xml
-    if (deletedParaId) {
+    if (deletedParaIds.size > 0) {
       const extParsed = await parseCommentsExtendedXml(handle);
       const extChildren = getCommentsExtendedArray(extParsed);
       if (extChildren.length > 0) {
@@ -1584,7 +1583,7 @@ export async function deleteComment(
           if (ce["w15:commentEx"] !== undefined) {
             const ceParaId = attr(ce, "w15:paraId") ?? "";
             const ceParentId = attr(ce, "w15:paraIdParent") ?? "";
-            if (ceParaId === deletedParaId || ceParentId === deletedParaId) {
+            if (deletedParaIds.has(ceParaId) || deletedParaIds.has(ceParentId)) {
               extChildren.splice(i, 1);
             }
           }

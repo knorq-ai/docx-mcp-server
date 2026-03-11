@@ -87,6 +87,12 @@ export function extractParagraphText(
         if (delText) text += `[-${delText}-]`;
       }
       // In default mode: skip deleted text entirely (accepted view)
+    } else if (child["w:sdt"]) {
+      // Structured document tags (common in Google Docs exports) — recurse into sdtContent
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) {
+        text += extractParagraphText(sdtContent["w:sdtContent"] as XNode[], showRevisions);
+      }
     }
   }
   return text;
@@ -238,53 +244,62 @@ interface RunInfo {
 function collectRuns(pChildren: XNode[]): RunInfo[] {
   const runs: RunInfo[] = [];
   let offset = 0;
-  for (const child of pChildren) {
-    if (child["w:r"]) {
-      const runC = child["w:r"];
-      const textNodes: XNode[] = [];
-      let runText = "";
-      for (const rc of runC) {
-        if (rc["w:t"]) {
-          for (const tn of rc["w:t"]) {
-            if (tn["#text"] !== undefined) {
-              textNodes.push(tn);
-              runText += String(tn["#text"]);
-            }
-          }
-        }
-      }
-      if (textNodes.length > 0) {
-        runs.push({ node: child, textNodes, text: runText, startOffset: offset });
-      }
-      offset += runText.length;
-    } else if (child["w:ins"]) {
-      // Include runs inside w:ins tracked insertions
-      const insChildren = child["w:ins"] as XNode[];
-      for (const insChild of insChildren) {
-        if (insChild["w:r"]) {
-          const runC = insChild["w:r"] as XNode[];
-          const textNodes: XNode[] = [];
-          let runText = "";
-          for (const rc of runC) {
-            if (rc["w:t"]) {
-              for (const tn of rc["w:t"]) {
-                if (tn["#text"] !== undefined) {
-                  textNodes.push(tn);
-                  runText += String(tn["#text"]);
-                }
+
+  function collectFromChildren(children: XNode[]): void {
+    for (const child of children) {
+      if (child["w:r"]) {
+        const runC = child["w:r"];
+        const textNodes: XNode[] = [];
+        let runText = "";
+        for (const rc of runC) {
+          if (rc["w:t"]) {
+            for (const tn of rc["w:t"]) {
+              if (tn["#text"] !== undefined) {
+                textNodes.push(tn);
+                runText += String(tn["#text"]);
               }
             }
           }
-          if (textNodes.length > 0) {
-            runs.push({ node: insChild, textNodes, text: runText, startOffset: offset });
+        }
+        if (textNodes.length > 0) {
+          runs.push({ node: child, textNodes, text: runText, startOffset: offset });
+        }
+        offset += runText.length;
+      } else if (child["w:ins"]) {
+        // Include runs inside w:ins tracked insertions
+        const insChildren = child["w:ins"] as XNode[];
+        for (const insChild of insChildren) {
+          if (insChild["w:r"]) {
+            const runC = insChild["w:r"] as XNode[];
+            const textNodes: XNode[] = [];
+            let runText = "";
+            for (const rc of runC) {
+              if (rc["w:t"]) {
+                for (const tn of rc["w:t"]) {
+                  if (tn["#text"] !== undefined) {
+                    textNodes.push(tn);
+                    runText += String(tn["#text"]);
+                  }
+                }
+              }
+            }
+            if (textNodes.length > 0) {
+              runs.push({ node: insChild, textNodes, text: runText, startOffset: offset });
+            }
+            offset += runText.length;
           }
-          offset += runText.length;
+        }
+      } else if (child["w:sdt"]) {
+        // Recurse into structured document tag content
+        const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+        if (sdtContent) {
+          collectFromChildren(sdtContent["w:sdtContent"] as XNode[]);
         }
       }
-    } else {
-      // Skip non-run elements (pPr, hyperlinks, etc.) for replacement
     }
   }
+
+  collectFromChildren(pChildren);
   return runs;
 }
 
@@ -513,6 +528,10 @@ export interface RunWithIndex {
 export function collectRunsWithIndices(pChildren: XNode[]): RunWithIndex[] {
   const runs: RunWithIndex[] = [];
   let offset = 0;
+  // NOTE: w:sdt is intentionally NOT traversed here. replaceInParagraphTracked
+  // splices pChildren by pIdx, which would destroy the SDT wrapper structure.
+  // SDT text is still readable via extractParagraphText and replaceable via
+  // the non-tracked collectRuns path which mutates text nodes in place.
   for (let i = 0; i < pChildren.length; i++) {
     const child = pChildren[i];
     if (child["w:r"]) {
