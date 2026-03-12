@@ -8,7 +8,7 @@ import { type XNode, attr, setAttr, findOne, el } from "./xml-helpers.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-export const TWIPS_PER_MM = 56.6929;
+export const TWIPS_PER_MM = 1440 / 25.4; // ≈56.692913…
 export const TWIPS_PER_INCH = 1440;
 
 export function twipsToMm(twips: number): number {

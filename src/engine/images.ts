@@ -4,6 +4,7 @@
 
 import {
   type XNode,
+  parser,
   attr,
   findOne,
 } from "./xml-helpers.js";
@@ -53,16 +54,21 @@ export function parseImageRelationships(
   relsXml: string,
 ): Map<string, string> {
   const map = new Map<string, string>();
-  // Match <Relationship> elements with image type
-  const re =
-    /<Relationship\s[^>]*?Id="([^"]+)"[^>]*?Target="([^"]+)"[^>]*?\/>/g;
   const imageType =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(relsXml)) !== null) {
-    const full = m[0];
-    if (full.includes(imageType)) {
-      map.set(m[1], m[2]);
+
+  const parsed: XNode[] = parser.parse(relsXml);
+  const root = parsed.find((n: XNode) => n["Relationships"] !== undefined);
+  if (!root) return map;
+
+  const children = root["Relationships"] as XNode[];
+  for (const child of children) {
+    if (child["Relationship"] === undefined) continue;
+    const id = attr(child, "Id");
+    const target = attr(child, "Target");
+    const type = attr(child, "Type");
+    if (id && target && type === imageType) {
+      map.set(id, target);
     }
   }
   return map;

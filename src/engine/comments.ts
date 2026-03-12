@@ -69,39 +69,105 @@ export function getNextCommentId(commentsChildren: XNode[]): number {
   return maxId + 1;
 }
 
+// ---------------------------------------------------------------------------
+// Infrastructure helpers (parsed XML, not string manipulation)
+// ---------------------------------------------------------------------------
+
+/** Add an Override entry to [Content_Types].xml if not already present. */
+async function ensureContentTypeOverride(
+  handle: DocxHandle,
+  partName: string,
+  contentType: string,
+): Promise<void> {
+  const ctXml = await handle.zip.file("[Content_Types].xml")?.async("string");
+  if (!ctXml) return;
+
+  const parsed: XNode[] = parser.parse(ctXml);
+  const typesRoot = parsed.find((n: XNode) => n["Types"] !== undefined);
+  if (!typesRoot) return;
+
+  const children = typesRoot["Types"] as XNode[];
+
+  // Check if Override for this partName already exists
+  for (const child of children) {
+    if (child["Override"] !== undefined && attr(child, "PartName") === partName) {
+      return; // Already present
+    }
+  }
+
+  // Add Override entry
+  children.push(
+    el("Override", [], { PartName: partName, ContentType: contentType }),
+  );
+
+  handle.zip.file("[Content_Types].xml", builder.build(parsed));
+}
+
+/** Add a Relationship entry to word/_rels/document.xml.rels if not already present. */
+async function ensureDocRelationship(
+  handle: DocxHandle,
+  type: string,
+  target: string,
+): Promise<void> {
+  const relsXml = await handle.zip
+    .file("word/_rels/document.xml.rels")
+    ?.async("string");
+  if (!relsXml) return;
+
+  const parsed: XNode[] = parser.parse(relsXml);
+  const root = parsed.find((n: XNode) => n["Relationships"] !== undefined);
+  if (!root) return;
+
+  const children = root["Relationships"] as XNode[];
+
+  // Check if relationship with this target already exists
+  for (const child of children) {
+    if (child["Relationship"] !== undefined && attr(child, "Target") === target) {
+      return; // Already present
+    }
+  }
+
+  // Find max rId
+  let maxRId = 0;
+  for (const child of children) {
+    if (child["Relationship"] !== undefined) {
+      const id = attr(child, "Id") ?? "";
+      const m = id.match(/^rId(\d+)$/);
+      if (m) {
+        const num = parseInt(m[1]);
+        if (num > maxRId) maxRId = num;
+      }
+    }
+  }
+
+  // Add Relationship entry
+  children.push(
+    el("Relationship", [], {
+      Id: `rId${maxRId + 1}`,
+      Type: type,
+      Target: target,
+    }),
+  );
+
+  handle.zip.file("word/_rels/document.xml.rels", builder.build(parsed));
+}
+
 export async function ensureCommentsInfrastructure(
   handle: DocxHandle,
 ): Promise<void> {
   // Ensure [Content_Types].xml has comments entry
-  const ctXml = await handle.zip
-    .file("[Content_Types].xml")
-    ?.async("string");
-  if (ctXml && !ctXml.includes("comments.xml")) {
-    const insertion =
-      '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>';
-    const newCtXml = ctXml.replace("</Types>", insertion + "</Types>");
-    handle.zip.file("[Content_Types].xml", newCtXml);
-  }
+  await ensureContentTypeOverride(
+    handle,
+    "/word/comments.xml",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+  );
 
   // Ensure word/_rels/document.xml.rels has comments relationship
-  const relsXml = await handle.zip
-    .file("word/_rels/document.xml.rels")
-    ?.async("string");
-  if (relsXml && !relsXml.includes("comments.xml")) {
-    // Find max rId
-    const rIdMatches = [...relsXml.matchAll(/rId(\d+)/g)];
-    const maxRId = rIdMatches.reduce(
-      (max, m) => Math.max(max, parseInt(m[1])),
-      0,
-    );
-    const newRId = `rId${maxRId + 1}`;
-    const insertion = `<Relationship Id="${newRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>`;
-    const newRelsXml = relsXml.replace(
-      "</Relationships>",
-      insertion + "</Relationships>",
-    );
-    handle.zip.file("word/_rels/document.xml.rels", newRelsXml);
-  }
+  await ensureDocRelationship(
+    handle,
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments",
+    "comments.xml",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -126,34 +192,18 @@ export async function ensureCommentsExtendedInfrastructure(
   handle: DocxHandle,
 ): Promise<void> {
   // Ensure [Content_Types].xml has commentsExtended entry
-  const ctXml = await handle.zip
-    .file("[Content_Types].xml")
-    ?.async("string");
-  if (ctXml && !ctXml.includes("commentsExtended.xml")) {
-    const insertion =
-      '<Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/>';
-    const newCtXml = ctXml.replace("</Types>", insertion + "</Types>");
-    handle.zip.file("[Content_Types].xml", newCtXml);
-  }
+  await ensureContentTypeOverride(
+    handle,
+    "/word/commentsExtended.xml",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml",
+  );
 
   // Ensure word/_rels/document.xml.rels has commentsExtended relationship
-  const relsXml = await handle.zip
-    .file("word/_rels/document.xml.rels")
-    ?.async("string");
-  if (relsXml && !relsXml.includes("commentsExtended.xml")) {
-    const rIdMatches = [...relsXml.matchAll(/rId(\d+)/g)];
-    const maxRId = rIdMatches.reduce(
-      (max, m) => Math.max(max, parseInt(m[1])),
-      0,
-    );
-    const newRId = `rId${maxRId + 1}`;
-    const insertion = `<Relationship Id="${newRId}" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/>`;
-    const newRelsXml = relsXml.replace(
-      "</Relationships>",
-      insertion + "</Relationships>",
-    );
-    handle.zip.file("word/_rels/document.xml.rels", newRelsXml);
-  }
+  await ensureDocRelationship(
+    handle,
+    "http://schemas.microsoft.com/office/2011/relationships/commentsExtended",
+    "commentsExtended.xml",
+  );
 }
 
 /** Generate a random 8-char uppercase hex string for w14:paraId */

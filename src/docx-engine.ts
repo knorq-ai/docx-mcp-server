@@ -348,11 +348,10 @@ export async function replaceText(
     const body = getBody(parsed);
 
     let totalReplacements = 0;
+    const maxId = trackChanges ? scanMaxId(parsed) : 0;
+    const ctx = trackChanges ? newRevisionContext(maxId + 1, author) : null;
 
-    if (trackChanges) {
-      const maxId = scanMaxId(parsed);
-      const ctx = newRevisionContext(maxId + 1, author);
-
+    if (ctx) {
       for (const child of body) {
         if (child["w:p"]) {
           totalReplacements += replaceInParagraphTracked(
@@ -388,8 +387,8 @@ export async function replaceText(
     // Optionally scan headers and footers
     if (includeHeadersFooters) {
       const hfFiles = getHeaderFooterFiles(handle);
-      // Track running max revision ID across all header/footer files
-      let hfMaxId = trackChanges ? scanMaxId(parsed) : 0;
+      // Use the running revision counter from body replacements to avoid ID overlap
+      let hfMaxId = ctx ? ctx.nextId - 1 : 0;
 
       for (const hfFile of hfFiles) {
         const hfXml = await handle.zip.file(hfFile)?.async("string");
@@ -1654,6 +1653,14 @@ export async function createDocument(
   content?: string,
   title?: string,
 ): Promise<string> {
+  // Validate file extension to prevent writing to arbitrary paths
+  if (!/\.docx$/i.test(filePath)) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `File path must end with .docx: ${filePath}`,
+    );
+  }
+
   return withFileLock(filePath, async () => {
     // Check parent directory exists
     const dir = path.dirname(filePath);
