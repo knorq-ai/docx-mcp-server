@@ -10,7 +10,7 @@ import {
 } from "./helpers.js";
 import {
   addComment,
-  addBatchComments,
+  addComments,
   readComments,
   replyToComment,
   deleteComment,
@@ -198,13 +198,13 @@ describe("addComment fuzzy matching", () => {
 });
 
 // =========================================================================
-// addBatchComments
+// addComments
 // =========================================================================
 
-describe("addBatchComments", () => {
+describe("addComments", () => {
   it("adds a single comment in batch", async () => {
     const p = await createTmpDoc("Batch test content");
-    const result = await addBatchComments(p, [
+    const result = await addComments(p, [
       { anchor_text: "test content", comment_text: "Single batch" },
     ]);
     expect(result).toContain("1 added, 0 failed");
@@ -215,7 +215,7 @@ describe("addBatchComments", () => {
 
   it("adds multiple comments to different paragraphs", async () => {
     const p = await createTmpDoc("First paragraph\nSecond paragraph\nThird paragraph");
-    const result = await addBatchComments(p, [
+    const result = await addComments(p, [
       { anchor_text: "First paragraph", comment_text: "Comment on first" },
       { anchor_text: "Second paragraph", comment_text: "Comment on second" },
       { anchor_text: "Third paragraph", comment_text: "Comment on third" },
@@ -230,7 +230,7 @@ describe("addBatchComments", () => {
 
   it("handles partial failure (some anchors not found)", async () => {
     const p = await createTmpDoc("Only this exists");
-    const result = await addBatchComments(p, [
+    const result = await addComments(p, [
       { anchor_text: "this exists", comment_text: "Found it" },
       { anchor_text: "nonexistent text", comment_text: "Won't be added" },
     ]);
@@ -245,14 +245,14 @@ describe("addBatchComments", () => {
 
   it("throws on empty comments array", async () => {
     const p = await createTmpDoc("Some text");
-    await expect(addBatchComments(p, [])).rejects.toMatchObject({
+    await expect(addComments(p, [])).rejects.toMatchObject({
       code: "INVALID_PARAMETER",
     });
   });
 
   it("uses per-comment author when provided", async () => {
     const p = await createTmpDoc("Author test text");
-    const result = await addBatchComments(
+    const result = await addComments(
       p,
       [{ anchor_text: "Author test", comment_text: "Custom author", author: "Alice" }],
       "DefaultAuthor",
@@ -266,7 +266,7 @@ describe("addBatchComments", () => {
 
   it("uses default author when per-comment author is not provided", async () => {
     const p = await createTmpDoc("Default author batch");
-    await addBatchComments(
+    await addComments(
       p,
       [{ anchor_text: "author batch", comment_text: "Default author test" }],
       "BatchReviewer",
@@ -278,7 +278,7 @@ describe("addBatchComments", () => {
 
   it("uses fuzzy matching in batch mode", async () => {
     const p = await createTmpDoc("価格は１０００円です");
-    const result = await addBatchComments(p, [
+    const result = await addComments(p, [
       { anchor_text: "1000円", comment_text: "Fuzzy batch" },
     ]);
     expect(result).toContain("1 added");

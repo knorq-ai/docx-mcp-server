@@ -9,6 +9,7 @@
  * Usage with Cursor:       Add to MCP server configuration
  */
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -25,9 +26,9 @@ import {
   deleteParagraphs,
   formatText,
   setParagraphFormat,
-  setParagraphFormatBulk,
+  setParagraphFormats,
   addComment,
-  addBatchComments,
+  addComments,
   readComments,
   replyToComment,
   deleteComment,
@@ -35,7 +36,7 @@ import {
   highlightText,
   insertTable,
   setHeading,
-  setHeadingBulk,
+  setHeadings,
   getPageLayout,
   setPageLayout,
   acceptAllChanges,
@@ -47,6 +48,9 @@ import {
   listImages,
   EngineError,
 } from "./docx-engine.js";
+
+const require = createRequire(import.meta.url);
+const { version: VERSION } = require("../package.json") as { version: string };
 
 function formatError(e: unknown): string {
   if (e instanceof EngineError) {
@@ -64,7 +68,7 @@ function formatError(e: unknown): string {
 
 const server = new McpServer({
   name: "docx-editor",
-  version: "1.0.0",
+  version: VERSION,
 });
 
 // ---------------------------------------------------------------------------
@@ -655,11 +659,11 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Tool: set_paragraph_format_bulk
+// Tool: set_paragraph_formats
 // ---------------------------------------------------------------------------
 
 server.tool(
-  "set_paragraph_format_bulk",
+  "set_paragraph_formats",
   "Apply paragraph formatting to multiple paragraphs in one operation. Much faster than calling set_paragraph_format repeatedly.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
@@ -720,7 +724,7 @@ server.tool(
           hangingIndent: g.hanging_indent,
         },
       }));
-      const result = await setParagraphFormatBulk(file_path, engineGroups);
+      const result = await setParagraphFormats(file_path, engineGroups);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {
@@ -769,11 +773,11 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Tool: add_batch_comments
+// Tool: add_comments
 // ---------------------------------------------------------------------------
 
 server.tool(
-  "add_batch_comments",
+  "add_comments",
   "Add multiple comments to a document in a single operation. Opens and saves the file only once. Supports partial success: comments with unfound anchors are reported as failures without blocking the rest.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
@@ -794,7 +798,7 @@ server.tool(
   },
   async ({ file_path, comments, default_author }) => {
     try {
-      const result = await addBatchComments(file_path, comments, default_author);
+      const result = await addComments(file_path, comments, default_author);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {
@@ -1016,11 +1020,11 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Tool: set_heading_bulk
+// Tool: set_headings
 // ---------------------------------------------------------------------------
 
 server.tool(
-  "set_heading_bulk",
+  "set_headings",
   "Convert multiple paragraphs to headings in one operation. Opens and saves the file only once.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
@@ -1041,7 +1045,7 @@ server.tool(
         paragraphIndex: h.paragraph_index,
         level: h.level,
       }));
-      const result = await setHeadingBulk(file_path, engineItems);
+      const result = await setHeadings(file_path, engineItems);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {

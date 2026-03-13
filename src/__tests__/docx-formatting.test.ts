@@ -8,7 +8,7 @@ import {
 import {
   formatText,
   setParagraphFormat,
-  setParagraphFormatBulk,
+  setParagraphFormats,
   highlightText,
   setHeading,
   readDocument,
@@ -318,13 +318,13 @@ describe("formatText cross-run", () => {
 });
 
 // =========================================================================
-// setParagraphFormatBulk
+// setParagraphFormats
 // =========================================================================
 
-describe("setParagraphFormatBulk", () => {
+describe("setParagraphFormats", () => {
   it("applies different formats to different groups", async () => {
     const p = await createTmpDoc("Line one\nLine two\nLine three\nLine four");
-    const result = await setParagraphFormatBulk(p, [
+    const result = await setParagraphFormats(p, [
       { indices: [0, 1], format: { alignment: "center", spaceAfter: 6 } },
       { indices: [2, 3], format: { alignment: "right", spaceBefore: 12 } },
     ]);
@@ -340,7 +340,7 @@ describe("setParagraphFormatBulk", () => {
 
   it("applies indentation via bulk", async () => {
     const p = await createTmpDoc("Indent me\nAnd me too");
-    await setParagraphFormatBulk(p, [
+    await setParagraphFormats(p, [
       { indices: [0, 1], format: { indentLeft: 720 } },
     ]);
     const xml = await readRawDocXml(p);
@@ -350,7 +350,7 @@ describe("setParagraphFormatBulk", () => {
   it("throws on out-of-range index", async () => {
     const p = await createTmpDoc("Only one paragraph");
     await expect(
-      setParagraphFormatBulk(p, [
+      setParagraphFormats(p, [
         { indices: [0, 5], format: { alignment: "center" } },
       ]),
     ).rejects.toMatchObject({ code: "INDEX_OUT_OF_RANGE" });
@@ -362,7 +362,7 @@ describe("setParagraphFormatBulk", () => {
     await insertTable(p, -1, 1, 1);
     // Block 1 is the table
     await expect(
-      setParagraphFormatBulk(p, [
+      setParagraphFormats(p, [
         { indices: [1], format: { alignment: "center" } },
       ]),
     ).rejects.toMatchObject({ code: "NOT_A_PARAGRAPH" });

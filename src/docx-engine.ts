@@ -12,7 +12,7 @@ import JSZip from "jszip";
 import { withFileLock } from "./engine/file-lock.js";
 
 // Re-export types and helpers needed by consumers (index.ts, tests)
-export { ErrorCode, EngineError } from "./engine/docx-io.js";
+export { ErrorCode, EngineError, escapeXml } from "./engine/docx-io.js";
 export type { ErrorCodeType } from "./engine/docx-io.js";
 export type { BlockInfo } from "./engine/text.js";
 export type { TextFormatting, ParagraphFormat } from "./engine/formatting.js";
@@ -274,6 +274,7 @@ export async function searchText(
 /** 検索結果の個別マッチ */
 export interface SearchMatch {
   blockIndex: number;
+  occurrences: number;
   context: string;
   fullText: string;
 }
@@ -301,11 +302,23 @@ export async function searchTextStructured(
 
   const searchStr = caseSensitive ? query : query.toLowerCase();
   const matches: SearchMatch[] = [];
+  let totalMatches = 0;
 
   for (const b of blocks) {
     const compare = caseSensitive ? b.text : b.text.toLowerCase();
     if (compare.includes(searchStr)) {
-      // マッチ周辺のコンテキストを抽出
+      // ブロック内の出現回数をカウント
+      let occurrences = 0;
+      let searchFrom = 0;
+      while (true) {
+        const idx = compare.indexOf(searchStr, searchFrom);
+        if (idx === -1) break;
+        occurrences++;
+        searchFrom = idx + searchStr.length;
+      }
+      totalMatches += occurrences;
+
+      // 最初のマッチ周辺のコンテキストを抽出
       const matchIdx = compare.indexOf(searchStr);
       const ctxStart = Math.max(0, matchIdx - 40);
       const ctxEnd = Math.min(b.text.length, matchIdx + query.length + 40);
@@ -315,6 +328,7 @@ export async function searchTextStructured(
         (ctxEnd < b.text.length ? "..." : "");
       matches.push({
         blockIndex: b.index,
+        occurrences,
         context: ctx,
         fullText: b.text,
       });
@@ -324,7 +338,7 @@ export async function searchTextStructured(
   return {
     file: path.basename(filePath),
     query,
-    totalMatches: matches.length,
+    totalMatches,
     matches,
   };
 }
@@ -755,10 +769,10 @@ export async function insertParagraphs(
     // Sort by position descending so higher-index inserts don't shift lower ones.
     // Append-position items (position < 0 or out of range) sort to the front
     // so they are processed before specific-position items.
+    const bodyIdxsForSort = blockBodyIndices(body);
     const sorted = [...items].sort((a, b) => {
-      const bodyIdxs = blockBodyIndices(body);
-      const posA = a.position < 0 || a.position >= bodyIdxs.length ? Infinity : a.position;
-      const posB = b.position < 0 || b.position >= bodyIdxs.length ? Infinity : b.position;
+      const posA = a.position < 0 || a.position >= bodyIdxsForSort.length ? Infinity : a.position;
+      const posB = b.position < 0 || b.position >= bodyIdxsForSort.length ? Infinity : b.position;
       if (posA === posB) return 0;
       return posB - posA;
     });
@@ -1022,10 +1036,10 @@ export async function setParagraphFormat(
 }
 
 // ---------------------------------------------------------------------------
-// 9b. set_paragraph_format_bulk
+// 9b. set_paragraph_formats
 // ---------------------------------------------------------------------------
 
-export async function setParagraphFormatBulk(
+export async function setParagraphFormats(
   filePath: string,
   groups: Array<{ indices: number[]; format: ParagraphFormat }>,
 ): Promise<string> {
@@ -1145,10 +1159,10 @@ export async function addComment(
 }
 
 // ---------------------------------------------------------------------------
-// 10b. add_batch_comments
+// 10b. add_comments
 // ---------------------------------------------------------------------------
 
-export async function addBatchComments(
+export async function addComments(
   filePath: string,
   comments: BatchCommentInput[],
   defaultAuthor: string = "Claude",
@@ -1911,7 +1925,7 @@ export async function setHeading(
 }
 
 // ---------------------------------------------------------------------------
-// 16b. set_heading_bulk
+// 16b. set_headings
 // ---------------------------------------------------------------------------
 
 export interface SetHeadingItem {
@@ -1919,7 +1933,7 @@ export interface SetHeadingItem {
   level: number;
 }
 
-export async function setHeadingBulk(
+export async function setHeadings(
   filePath: string,
   items: SetHeadingItem[],
 ): Promise<string> {

@@ -84,8 +84,8 @@ npx vitest run    # 全テスト実行
 
 - `read_document` で全体を読んでから書き換える → ブロックインデックスのずれが発生する。代わりに `search_text` で対象を特定してから最小範囲の編集を行う
 - `track_changes: false` でサイレント編集 → 変更が追跡されず、レビューが困難になる。明示的な理由がない限りデフォルト（true）を使う
-- 大量の段落書式を個別に `set_paragraph_format` で設定 → `set_paragraph_format_bulk` でまとめて適用する
+- 大量の段落書式を個別に `set_paragraph_format` で設定 → `set_paragraph_formats` でまとめて適用する
 - 複数の段落を個別に `edit_paragraph` で編集 → `edit_paragraphs` でまとめて適用する（1 回のファイル読み書きで済む）
 - 複数の段落を個別に `insert_paragraph` で挿入 → `insert_paragraphs` でまとめて挿入する（インデックスシフトも内部で処理される）
 - 複数のセルを個別に `edit_table_cell` で編集 → `edit_table_cells` でまとめて適用する
-- 複数の見出しを個別に `set_heading` で設定 → `set_heading_bulk` でまとめて設定する
+- 複数の見出しを個別に `set_heading` で設定 → `set_headings` でまとめて設定する

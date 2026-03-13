@@ -8,7 +8,7 @@ import {
   readDocument,
   editParagraphs,
   insertParagraphs,
-  setHeadingBulk,
+  setHeadings,
   editTableCells,
   insertTable,
   acceptAllChanges,
@@ -201,13 +201,13 @@ describe("insertParagraphs", () => {
 });
 
 // =========================================================================
-// setHeadingBulk
+// setHeadings
 // =========================================================================
 
-describe("setHeadingBulk", () => {
+describe("setHeadings", () => {
   it("sets multiple headings in one call", async () => {
     const p = await createTmpDoc("Title\nSubtitle\nBody\nAnother");
-    await setHeadingBulk(p, [
+    await setHeadings(p, [
       { paragraphIndex: 0, level: 1 },
       { paragraphIndex: 1, level: 2 },
       { paragraphIndex: 3, level: 3 },
@@ -221,17 +221,17 @@ describe("setHeadingBulk", () => {
   it("validates heading level range", async () => {
     const p = await createTmpDoc("Test");
     await expect(
-      setHeadingBulk(p, [{ paragraphIndex: 0, level: 0 }]),
+      setHeadings(p, [{ paragraphIndex: 0, level: 0 }]),
     ).rejects.toThrow("between 1 and 9");
     await expect(
-      setHeadingBulk(p, [{ paragraphIndex: 0, level: 10 }]),
+      setHeadings(p, [{ paragraphIndex: 0, level: 10 }]),
     ).rejects.toThrow("between 1 and 9");
   });
 
   it("throws INDEX_OUT_OF_RANGE for invalid index", async () => {
     const p = await createTmpDoc("One");
     await expect(
-      setHeadingBulk(p, [{ paragraphIndex: 99, level: 1 }]),
+      setHeadings(p, [{ paragraphIndex: 99, level: 1 }]),
     ).rejects.toThrow("out of range");
   });
 
@@ -239,13 +239,13 @@ describe("setHeadingBulk", () => {
     const p = await createTmpDoc("Before");
     await insertTable(p, -1, 2, 2);
     await expect(
-      setHeadingBulk(p, [{ paragraphIndex: 1, level: 1 }]),
+      setHeadings(p, [{ paragraphIndex: 1, level: 1 }]),
     ).rejects.toThrow("not a paragraph");
   });
 
   it("returns correct summary", async () => {
     const p = await createTmpDoc("A\nB");
-    const result = await setHeadingBulk(p, [
+    const result = await setHeadings(p, [
       { paragraphIndex: 0, level: 1 },
       { paragraphIndex: 1, level: 2 },
     ]);
@@ -254,7 +254,7 @@ describe("setHeadingBulk", () => {
 
   it("sets outline level correctly in XML", async () => {
     const p = await createTmpDoc("Test");
-    await setHeadingBulk(p, [{ paragraphIndex: 0, level: 3 }]);
+    await setHeadings(p, [{ paragraphIndex: 0, level: 3 }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain('w:val="Heading3"');
     expect(xml).toContain('w:val="2"'); // outlineLvl = level - 1
@@ -262,7 +262,7 @@ describe("setHeadingBulk", () => {
 
   it("handles empty items array without file I/O", async () => {
     const p = await createTmpDoc("Unchanged");
-    const result = await setHeadingBulk(p, []);
+    const result = await setHeadings(p, []);
     expect(result).toContain("No headings to set");
   });
 });

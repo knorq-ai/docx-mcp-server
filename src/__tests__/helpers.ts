@@ -7,7 +7,7 @@ import * as path from "path";
 import * as fs from "fs/promises";
 import * as crypto from "crypto";
 import JSZip from "jszip";
-import { createDocument, EngineError, ErrorCode } from "../docx-engine.js";
+import { createDocument, EngineError, ErrorCode, escapeXml } from "../docx-engine.js";
 
 export { EngineError, ErrorCode };
 
@@ -152,14 +152,7 @@ export async function createCrossRunDoc(
   return p;
 }
 
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
+// escapeXml is imported from docx-engine.ts (canonical implementation in engine/docx-io.ts)
 
 export async function createDocWithBookmark(
   text: string,
