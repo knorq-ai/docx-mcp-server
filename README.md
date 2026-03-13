@@ -10,9 +10,9 @@ A local [MCP](https://modelcontextprotocol.io/) server for reading and editing W
 |---|---|
 | **Read** | `read_document`, `get_document_info`, `search_text`, `list_images` |
 | **Edit** | `replace_text`, `edit_paragraph`, `edit_paragraphs`, `insert_paragraph`, `insert_paragraphs`, `delete_paragraph`, `delete_paragraphs` |
-| **Format** | `format_text`, `set_paragraph_format`, `set_paragraph_format_bulk`, `highlight_text`, `set_heading`, `set_heading_bulk` |
+| **Format** | `format_text`, `set_paragraph_format`, `set_paragraph_formats`, `highlight_text`, `set_heading`, `set_headings` |
 | **Structure** | `insert_table`, `create_document` |
-| **Review** | `add_comment`, `add_batch_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
+| **Review** | `add_comment`, `add_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
 | **Headers/footers** | `read_header_footer` |
@@ -237,7 +237,7 @@ file_path, search, bold?, italic?, underline?, strikethrough?, highlight_color?,
 file_path, paragraph_index, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?
 ```
 
-**`set_paragraph_format_bulk`** — Apply paragraph formatting to multiple paragraphs in one operation.
+**`set_paragraph_formats`** — Apply paragraph formatting to multiple paragraphs in one operation.
 ```
 file_path, groups (array of {indices, alignment?, space_before?, ...})
 ```
@@ -252,7 +252,7 @@ file_path, search, color?, case_sensitive?
 file_path, paragraph_index, level
 ```
 
-**`set_heading_bulk`** — Convert multiple paragraphs to headings in one operation.
+**`set_headings`** — Convert multiple paragraphs to headings in one operation.
 ```
 file_path, items (array of {paragraph_index, level})
 ```
@@ -276,7 +276,7 @@ file_path, title?, content?
 file_path, anchor_text, comment_text, author?
 ```
 
-**`add_batch_comments`** — Add multiple comments in one operation. Supports partial success.
+**`add_comments`** — Add multiple comments in one operation. Supports partial success.
 ```
 file_path, comments (array of {anchor_text, comment_text, author?}), default_author?
 ```
