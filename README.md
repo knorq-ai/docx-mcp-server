@@ -354,26 +354,28 @@ AI agents can manipulate DOCX via raw Python (python-docx), but MCP tools are si
 
 | Metric | MCP tools | Raw Python |
 |--------|-----------|------------|
-| Output tokens per operation | **80–95% less** | Baseline (agent must generate full code) |
-| Cost per operation | **70–90% less** | Baseline |
-| Break-even | **2 operations** | — |
+| Output tokens per operation | **65–95% less** | Baseline (agent must generate full code) |
+| Cost per operation | **55–90% less** | Baseline |
+| Break-even | **3–5 operations** | — |
 | Debug iterations | None (validated inputs) | ~1.5 retries/task on average |
 
-### Scenario comparison (output tokens)
+### Scenario comparison (output tokens, measured from actual code)
 
 | Task | MCP | Python (python-docx) | Savings |
 |------|-----|---------------------|---------|
-| Read paragraphs 0–20 | ~30 | ~250 (open, iterate, print) | **88%** |
-| Search and replace text | ~60 | ~350 (regex, run traversal) | **83%** |
-| Add tracked change (insert) | ~50 | ~600 (build w:ins XML, datetime, author, run properties) | **92%** |
-| Add comment anchored to text | ~50 | ~700 (comment part, anchor markers, relationship, XML manipulation) | **93%** |
-| Format text (bold + color) | ~50 | ~400 (find runs, split at boundaries, apply rPr) | **88%** |
-| Set paragraph format (3 paragraphs) | ~60 | ~350 (load, resolve indices, set properties, save) | **83%** |
-| Composite: read → search → edit → comment | ~190 | ~1,800 | **89%** |
+| Read paragraphs 0–20 | ~18 | ~52 (open, iterate, print) | **65%** |
+| Search and replace text | ~16 | ~67 (iterate paragraphs, run traversal) | **76%** |
+| Add tracked change (insert) | ~32 | ~326 (build w:ins/w:del XML, datetime, author, run properties) | **90%** |
+| Add comment anchored to text | ~26 | ~575 (comment part, anchor markers, relationship, XML manipulation) | **95%** |
+| Format text (bold + color) | ~20 | ~478 (find runs, split at boundaries, apply rPr) | **96%** |
+| Set paragraph format (3 paragraphs) | ~30 | ~80 (load, resolve indices, set properties, save) | **63%** |
+| Composite: read → search → edit → comment | ~120 | ~1,000 | **88%** |
 
-The savings are especially large for **tracked changes** and **comments** — python-docx has no built-in API for these, so the agent must generate raw OOXML manipulation code (~500–700 output tokens per operation). MCP tools handle this complexity internally with a simple parameter call.
+The savings are especially large for **tracked changes**, **comments**, and **run-level formatting** — python-docx has no built-in API for track changes or comments, and text formatting requires complex run-splitting logic. The agent must generate raw OOXML manipulation code (~300–575 output tokens per operation). MCP tools handle this internally with a simple parameter call.
 
-Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 32 tools) pays for itself in 2 operations.
+Simple read and paragraph-format operations see smaller savings (~63–76%) since python-docx has clean APIs for these.
+
+Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 32 tools) pays for itself in 3–5 operations.
 
 ## Requirements
 
