@@ -28,6 +28,7 @@
     "track-changes",
     "model-context-protocol"
   ],
+  "author": "docx-mcp-server contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -38,7 +39,7 @@
     "url": "https://github.com/knorq-ai/docx-mcp-server/issues"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

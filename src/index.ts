@@ -69,6 +69,20 @@ function formatError(e: unknown): string {
 const server = new McpServer({
   name: "docx-editor",
   version: VERSION,
+  description: [
+    "Read, edit, format, comment, and manage Word (.docx) documents.",
+    "",
+    "Supported: paragraph read/write, tracked changes (w:ins/w:del), text formatting",
+    "(bold/italic/underline/font/color/highlight), paragraph formatting (alignment/spacing/indent),",
+    "headings, tables, comments with threading, page layout, headers/footers, footnotes, images.",
+    "",
+    "NOT supported (use python-docx or direct XML instead):",
+    "- Embedded chart editing",
+    "- Form fields / content controls editing",
+    "- Macro execution (.docm)",
+    "- Image insertion or modification (read-only via list_images)",
+    "- Style definition creation (applies inline formatting, not named styles)",
+  ].join("\n"),
 });
 
 // ---------------------------------------------------------------------------

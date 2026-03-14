@@ -1,5 +1,7 @@
 # docx-mcp-server
 
+[![CI](https://github.com/knorq-ai/docx-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/knorq-ai/docx-mcp-server/actions/workflows/ci.yml)
+
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
 **32 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
@@ -348,7 +350,7 @@ file_path
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20+
 
 ## License
 
