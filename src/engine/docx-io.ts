@@ -100,14 +100,6 @@ export function getBody(parsed: XNode[]): XNode[] {
   return bodyEl["w:body"];
 }
 
-export function setBody(parsed: XNode[], newBody: XNode[]): void {
-  const docEl = parsed.find((n: XNode) => n["w:document"]);
-  if (!docEl) return;
-  const bodyEl = docEl["w:document"].find((n: XNode) => n["w:body"]);
-  if (!bodyEl) return;
-  bodyEl["w:body"] = newBody;
-}
-
 /** Returns the indices into the body array for content blocks (paragraphs + tables) */
 export function blockBodyIndices(body: XNode[]): number[] {
   const indices: number[] = [];

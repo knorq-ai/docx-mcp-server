@@ -934,8 +934,8 @@ export async function deleteParagraphs(
         markBlockAsDeleted(body[bodyIdxs[idx]], ctx);
       }
     } else {
-      // Hard delete: sort descending to avoid index shifting
-      const sorted = [...paragraphIndices].sort((a, b) => b - a);
+      // Hard delete: deduplicate and sort descending to avoid index shifting
+      const sorted = [...new Set(paragraphIndices)].sort((a, b) => b - a);
       for (const idx of sorted) {
         body.splice(bodyIdxs[idx], 1);
       }
@@ -1124,7 +1124,7 @@ export async function addComment(
     const commentParas = lines.map((line) =>
       el("w:p", [
         el("w:r", [
-          el("w:t", [textNode(escapeXml(line))], { "xml:space": "preserve" }),
+          el("w:t", [textNode(line)], { "xml:space": "preserve" }),
         ]),
       ]),
     );
@@ -1226,7 +1226,7 @@ export async function addComments(
       const commentParas = lines.map((line) =>
         el("w:p", [
           el("w:r", [
-            el("w:t", [textNode(escapeXml(line))], { "xml:space": "preserve" }),
+            el("w:t", [textNode(line)], { "xml:space": "preserve" }),
           ]),
         ]),
       );
@@ -1479,7 +1479,7 @@ export async function replyToComment(
     const replyParas = lines.map((line, idx) => {
       const para = el("w:p", [
         el("w:r", [
-          el("w:t", [textNode(escapeXml(line))], { "xml:space": "preserve" }),
+          el("w:t", [textNode(line)], { "xml:space": "preserve" }),
         ]),
       ]);
       // Set paraId on last paragraph for threading (commentsExtended convention)
@@ -2252,6 +2252,15 @@ function replaceCellText(
         const rPr = getRunRPr(runC);
         if (!firstRPr && rPr) firstRPr = rPr;
         oldText += extractRunText(runC);
+      } else if (child["w:ins"]) {
+        for (const insChild of child["w:ins"]) {
+          if (insChild["w:r"]) {
+            const runC = insChild["w:r"] as XNode[];
+            const rPr = getRunRPr(runC);
+            if (!firstRPr && rPr) firstRPr = rPr;
+            oldText += extractRunText(runC);
+          }
+        }
       }
     }
 

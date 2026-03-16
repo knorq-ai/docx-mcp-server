@@ -11,16 +11,29 @@ export type XNode = any;
 // Parser / Builder instances (shared, stateless)
 // ---------------------------------------------------------------------------
 
+/** Decode numeric character references (&#NNN; and &#xHHH;) that processEntities doesn't handle. */
+function decodeNumericRefs(_name: string, val: unknown): unknown {
+  if (typeof val !== "string") return val;
+  return val
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCodePoint(parseInt(dec, 10)));
+}
+
 const parserOpts = {
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
   preserveOrder: true,
   trimValues: false,
-  processEntities: false,
+  // Decode standard XML entities (&amp; → &, &lt; → <, etc.) so text nodes
+  // contain human-readable text.  The builder re-encodes them on output.
+  processEntities: true,
   // Never convert text content to numbers — "1." and ".0" must stay as strings
   parseTagValue: false,
   // commentPropName keeps XML comments (<!-- ... -->) instead of dropping them
   commentPropName: "#comment",
+  // Decode numeric character references (&#160; → NBSP, &#x20AC; → €, etc.)
+  // that processEntities alone does not handle.
+  tagValueProcessor: decodeNumericRefs,
 };
 
 const builderOpts = {
@@ -28,7 +41,8 @@ const builderOpts = {
   attributeNamePrefix: "@_",
   preserveOrder: true,
   suppressEmptyNode: true,
-  processEntities: false,
+  // Re-encode &, <, > in text nodes so the output is always valid XML.
+  processEntities: true,
   commentPropName: "#comment",
 };
 

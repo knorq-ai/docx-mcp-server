@@ -442,3 +442,24 @@ describe("deleteComment", () => {
     expect(result).not.toContain("Delete me");
   });
 });
+
+// =========================================================================
+// Entity handling in comments
+// =========================================================================
+
+describe("comment entity handling", () => {
+  it("preserves special characters in comment text", async () => {
+    const p = await createTmpDoc("Hello world");
+    await addComment(p, "Hello", "Use AT&T <network> for \"enterprise\"");
+    const result = await readComments(p);
+    expect(result).toContain("AT&T <network>");
+  });
+
+  it("preserves special characters in reply text", async () => {
+    const p = await createTmpDoc("Hello world");
+    await addComment(p, "Hello", "First comment");
+    await replyToComment(p, 0, "Reply with & and <angle>");
+    const result = await readComments(p);
+    expect(result).toContain("Reply with & and <angle>");
+  });
+});

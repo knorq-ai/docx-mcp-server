@@ -376,3 +376,50 @@ describe("deleteParagraphs", () => {
     expect(result).toContain("3 block(s)");
   });
 });
+
+// =========================================================================
+// XML entity handling — special characters in text
+// =========================================================================
+
+describe("XML entity handling", () => {
+  it("round-trips text with ampersand via editParagraph", async () => {
+    const p = await createTmpDoc("Hello world");
+    await editParagraph(p, 0, "AT&T and <tags> work", false);
+    const result = await readDocument(p);
+    expect(result).toContain("AT&T and <tags> work");
+  });
+
+  it("round-trips text with ampersand via replaceText (untracked)", async () => {
+    const p = await createTmpDoc("Hello world");
+    await replaceText(p, "world", "R&D dept", false, false);
+    const result = await readDocument(p);
+    expect(result).toContain("Hello R&D dept");
+  });
+
+  it("round-trips text with ampersand via replaceText (tracked)", async () => {
+    const p = await createTmpDoc("Hello world");
+    await replaceText(p, "world", "R&D dept", false, true);
+    const result = await readDocument(p);
+    expect(result).toContain("Hello R&D dept");
+  });
+
+  it("round-trips text with ampersand via insertParagraph", async () => {
+    const p = await createTmpDoc("First");
+    await insertParagraph(p, "A<B & C>D", -1, undefined, false);
+    const result = await readDocument(p);
+    expect(result).toContain("A<B & C>D");
+  });
+
+  it("produces valid XML when text contains special chars", async () => {
+    const p = await createTmpDoc("Hello world");
+    await editParagraph(p, 0, "AT&T <Corp> \"quoted\"", false);
+    const raw = await readRawDocXml(p);
+    // The raw XML should contain proper entity encoding
+    expect(raw).toContain("&amp;");
+    expect(raw).toContain("&lt;");
+    expect(raw).toContain("&gt;");
+    // And should NOT contain unescaped & or < in text content
+    expect(raw).not.toMatch(/AT&T/);
+    expect(raw).not.toMatch(/<Corp>/);
+  });
+});

@@ -315,14 +315,20 @@ export function applyParagraphFormat(
     else props.push(jcEl);
   }
 
-  // Spacing
+  // Spacing — merge with existing attributes to preserve values not being overridden
   if (
     fmt.spaceBefore !== undefined ||
     fmt.spaceAfter !== undefined ||
     fmt.lineSpacing !== undefined
   ) {
     const idx = props.findIndex((n: XNode) => n["w:spacing"] !== undefined);
+    const existing = idx !== -1 ? (props[idx][":@"] ?? {}) : {};
     const attrs: Record<string, string> = {};
+    // Preserve existing attributes
+    for (const [k, v] of Object.entries(existing)) {
+      if (k.startsWith("@_")) attrs[k.slice(2)] = v as string;
+    }
+    // Override with new values
     if (fmt.spaceBefore !== undefined) {
       attrs["w:before"] = String(Math.round(fmt.spaceBefore * 20)); // pts to twips
     }
@@ -338,7 +344,7 @@ export function applyParagraphFormat(
     else props.push(spEl);
   }
 
-  // Indentation
+  // Indentation — merge with existing attributes to preserve values not being overridden
   if (
     fmt.indentLeft !== undefined ||
     fmt.indentRight !== undefined ||
@@ -346,7 +352,13 @@ export function applyParagraphFormat(
     fmt.hangingIndent !== undefined
   ) {
     const idx = props.findIndex((n: XNode) => n["w:ind"] !== undefined);
+    const existing = idx !== -1 ? (props[idx][":@"] ?? {}) : {};
     const attrs: Record<string, string> = {};
+    // Preserve existing attributes
+    for (const [k, v] of Object.entries(existing)) {
+      if (k.startsWith("@_")) attrs[k.slice(2)] = v as string;
+    }
+    // Override with new values
     if (fmt.indentLeft !== undefined) attrs["w:left"] = String(fmt.indentLeft);
     if (fmt.indentRight !== undefined) attrs["w:right"] = String(fmt.indentRight);
     if (fmt.firstLineIndent !== undefined)
