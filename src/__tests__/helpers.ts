@@ -541,7 +541,69 @@ export async function createDocWithInlineSdt(
   return p;
 }
 
-async function writeMinimalDocx(filePath: string, documentXml: string): Promise<void> {
+/**
+ * Create a doc with a paragraph that has numPr (numbering properties) in its pPr.
+ * Optionally includes style, alignment, and indentation for testing copy_format_from.
+ */
+export async function createDocWithNumberedParagraph(
+  text: string,
+  numId: number,
+  ilvl: number = 0,
+  opts?: { style?: string; alignment?: string; indentLeft?: number },
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+
+  const pPrParts: string[] = [];
+  if (opts?.style) pPrParts.push(`<w:pStyle w:val="${escapeXml(opts.style)}"/>`);
+  pPrParts.push(`<w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`);
+  if (opts?.alignment) pPrParts.push(`<w:jc w:val="${escapeXml(opts.alignment)}"/>`);
+  if (opts?.indentLeft !== undefined) pPrParts.push(`<w:ind w:left="${opts.indentLeft}"/>`);
+
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:pPr>${pPrParts.join("")}</w:pPr>
+  <w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>
+</w:p>
+<w:p><w:r><w:t>Plain paragraph</w:t></w:r></w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+/**
+ * Create a doc with a paragraph that has tracked change markers in its pPr > rPr.
+ */
+export async function createDocWithTrackedPPr(text: string): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:pPr>
+    <w:pStyle w:val="Heading1"/>
+    <w:numPr><w:ilvl w:val="0"/><w:numId w:val="7"/></w:numPr>
+    <w:rPr>
+      <w:ins w:id="99" w:author="OldAuthor" w:date="2024-01-01T00:00:00Z"/>
+    </w:rPr>
+  </w:pPr>
+  <w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+export async function writeMinimalDocx(filePath: string, documentXml: string): Promise<void> {
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
 <w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>

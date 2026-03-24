@@ -3,6 +3,7 @@ import {
   createTmpDoc,
   cleanupTmpFiles,
   readRawDocXml,
+  createDocWithNumberedParagraph,
 } from "./helpers.js";
 import {
   readDocument,
@@ -197,6 +198,79 @@ describe("insertParagraphs", () => {
     expect(result).toContain("No paragraphs to insert");
     const doc = await readDocument(p);
     expect(doc).toContain("Unchanged");
+  });
+
+  it("inserts with numId and numLevel", async () => {
+    const p = await createTmpDoc("Existing");
+    await insertParagraphs(
+      p,
+      [
+        { text: "Item 1", position: -1, numId: 14, numLevel: 0 },
+        { text: "Item 2", position: -1, numId: 14, numLevel: 0 },
+      ],
+      false,
+    );
+    const xml = await readRawDocXml(p);
+    const numIdMatches = xml.match(/w:numId/g);
+    expect(numIdMatches).not.toBeNull();
+    expect(numIdMatches!.length).toBe(2);
+  });
+
+  it("inserts with copy_format_from", async () => {
+    const p = await createTmpDoc("Existing");
+    // Insert a heading to serve as format source
+    await insertParagraphs(
+      p,
+      [{ text: "Source heading", position: 0, style: "Heading1", numId: 14, numLevel: 0 }],
+      false,
+    );
+    // Now copy format from index 0
+    await insertParagraphs(
+      p,
+      [{ text: "Copied para", position: -1, copyFormatFrom: 0 }],
+      false,
+    );
+    const xml = await readRawDocXml(p);
+    // Should have Heading1 and numId in both original and copied
+    const headingMatches = xml.match(/Heading1/g);
+    expect(headingMatches).not.toBeNull();
+    expect(headingMatches!.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("bulk copy_format_from references original indices (not shifted)", async () => {
+    // Block 0 = numbered heading, Block 1 = plain
+    const p = await createDocWithNumberedParagraph("第1条 定義", 14, 0, { style: "Heading1" });
+    // Insert two paragraphs both copying from original block 0.
+    // Even though positions shift, copy_format_from should resolve against the
+    // original document state before any inserts.
+    await insertParagraphs(
+      p,
+      [
+        { text: "第2条 適用", position: 1, copyFormatFrom: 0 },
+        { text: "第3条 委託", position: 2, copyFormatFrom: 0 },
+      ],
+      false,
+    );
+    const xml = await readRawDocXml(p);
+    // Should have three Heading1 paragraphs with numId=14
+    expect((xml.match(/Heading1/g) || []).length).toBeGreaterThanOrEqual(3);
+    expect((xml.match(/w:numId/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("bulk mixed numId and copy_format_from items", async () => {
+    const p = await createDocWithNumberedParagraph("Source", 14, 0, { style: "Heading1" });
+    await insertParagraphs(
+      p,
+      [
+        { text: "Explicit num", position: -1, numId: 5, numLevel: 1 },
+        { text: "Copied format", position: -1, copyFormatFrom: 0 },
+      ],
+      false,
+    );
+    const xml = await readRawDocXml(p);
+    // numId=5 for explicit, numId=14 for copy (and original)
+    expect(xml).toMatch(/w:numId[^>]*w:val="5"/);
+    expect((xml.match(/w:val="14"/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 });
 

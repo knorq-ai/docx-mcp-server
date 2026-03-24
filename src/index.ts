@@ -340,7 +340,7 @@ server.tool(
 
 server.tool(
   "insert_paragraph",
-  "Insert a new paragraph at a specific position. Use style names like 'Heading1', 'Heading2', 'Normal', etc. Use position=-1 to append at the end.",
+  "Insert a new paragraph at a specific position. Use style names like 'Heading1', 'Heading2', 'Normal', etc. Use position=-1 to append at the end. To reproduce Word's list-based numbering (e.g. 第1条, 第2条…), use num_id/num_level or copy_format_from.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     text: z.string().describe("Text content of the new paragraph"),
@@ -351,6 +351,19 @@ server.tool(
       .string()
       .optional()
       .describe("Paragraph style (e.g., 'Heading1', 'Heading2', 'Normal')"),
+    num_id: z
+      .number()
+      .optional()
+      .describe("Numbering definition ID (w:numId). Produces <w:numPr> in the paragraph properties. Use with num_level. Ignored if copy_format_from is set."),
+    num_level: z
+      .number()
+      .optional()
+      .default(0)
+      .describe("Numbering indentation level (w:ilvl), 0-based. Default 0."),
+    copy_format_from: z
+      .number()
+      .optional()
+      .describe("Block index of an existing paragraph whose w:pPr to deep-copy (numbering, indentation, spacing, borders, etc.). When set, style/num_id/num_level are ignored."),
     track_changes: z
       .boolean()
       .optional()
@@ -364,7 +377,7 @@ server.tool(
       .default("Claude")
       .describe("Author name for tracked changes"),
   },
-  async ({ file_path, text, position, style, track_changes, author }) => {
+  async ({ file_path, text, position, style, track_changes, author, num_id, num_level, copy_format_from }) => {
     try {
       const result = await insertParagraph(
         file_path,
@@ -373,6 +386,9 @@ server.tool(
         style,
         track_changes,
         author,
+        num_id,
+        num_level,
+        copy_format_from,
       );
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -390,7 +406,7 @@ server.tool(
 
 server.tool(
   "insert_paragraphs",
-  "Insert multiple paragraphs in one operation. Handles index shifting internally by processing in reverse order. Opens and saves the file only once.",
+  "Insert multiple paragraphs in one operation. Handles index shifting internally by processing in reverse order. Opens and saves the file only once. Supports numbering (num_id/num_level) and format copying (copy_format_from).",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     paragraphs: z
@@ -404,6 +420,19 @@ server.tool(
             .string()
             .optional()
             .describe("Paragraph style (e.g., 'Heading1', 'Normal')"),
+          num_id: z
+            .number()
+            .optional()
+            .describe("Numbering definition ID (w:numId). Ignored if copy_format_from is set."),
+          num_level: z
+            .number()
+            .optional()
+            .default(0)
+            .describe("Numbering indentation level (w:ilvl), 0-based. Default 0."),
+          copy_format_from: z
+            .number()
+            .optional()
+            .describe("Block index of an existing paragraph whose w:pPr to deep-copy. When set, style/num_id/num_level are ignored."),
         }),
       )
       .describe("Array of paragraphs to insert"),
@@ -422,7 +451,14 @@ server.tool(
     try {
       const result = await insertParagraphs(
         file_path,
-        paragraphs,
+        paragraphs.map(p => ({
+          text: p.text,
+          position: p.position,
+          style: p.style,
+          numId: p.num_id,
+          numLevel: p.num_level,
+          copyFormatFrom: p.copy_format_from,
+        })),
         track_changes,
         author,
       );

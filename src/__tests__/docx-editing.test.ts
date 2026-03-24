@@ -5,6 +5,8 @@ import {
   readRawDocXml,
   createCrossRunDoc,
   createDocWithInlineSdt,
+  createDocWithNumberedParagraph,
+  createDocWithTrackedPPr,
 } from "./helpers.js";
 import {
   readDocument,
@@ -273,6 +275,152 @@ describe("insertParagraph", () => {
     // Should have w:ins inside w:rPr inside w:pPr (paragraph break marker)
     expect(xml).toContain("w:pPr");
     expect(xml).toContain("w:rPr");
+  });
+
+  it("inserts with numId and numLevel (untracked)", async () => {
+    const p = await createTmpDoc("Existing");
+    await insertParagraph(p, "Numbered item", -1, undefined, false, "Claude", 14, 0);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:numPr");
+    expect(xml).toContain("w:numId");
+    expect(xml).toMatch(/w:numId[^>]*w:val="14"/);
+    expect(xml).toMatch(/w:ilvl[^>]*w:val="0"/);
+  });
+
+  it("inserts with numId and custom numLevel", async () => {
+    const p = await createTmpDoc("Existing");
+    await insertParagraph(p, "Sub-item", -1, undefined, false, "Claude", 5, 2);
+    const xml = await readRawDocXml(p);
+    expect(xml).toMatch(/w:numId[^>]*w:val="5"/);
+    expect(xml).toMatch(/w:ilvl[^>]*w:val="2"/);
+  });
+
+  it("inserts with numId combined with style", async () => {
+    const p = await createTmpDoc("Existing");
+    await insertParagraph(p, "Heading item", -1, "Heading1", false, "Claude", 14, 0);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("Heading1");
+    expect(xml).toContain("w:numPr");
+  });
+
+  it("inserts with numId tracked", async () => {
+    const p = await createTmpDoc("Existing");
+    await insertParagraph(p, "Tracked numbered", -1, undefined, true, "Claude", 14, 0);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:numPr");
+    expect(xml).toContain("w:ins");
+  });
+
+  it("inserts with copy_format_from (untracked)", async () => {
+    const p = await createTmpDoc("Existing");
+    // First, insert a paragraph with numbering to use as source
+    await insertParagraph(p, "Source heading", 0, "Heading1", false, "Claude", 14, 0);
+    // Now insert a new paragraph copying format from index 0
+    await insertParagraph(p, "Copied format", -1, undefined, false, "Claude", undefined, undefined, 0);
+    const xml = await readRawDocXml(p);
+    // The last paragraph should have the same numPr as the source
+    // Count occurrences of numId=14 — should appear twice
+    const matches = xml.match(/w:numId/g);
+    expect(matches).not.toBeNull();
+    expect(matches!.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("inserts with copy_format_from (tracked)", async () => {
+    const p = await createTmpDoc("Existing");
+    await insertParagraph(p, "Source", 0, "Heading2", false);
+    // Copy format from the Heading2 paragraph with tracking
+    await insertParagraph(p, "Copied tracked", -1, undefined, true, "Bob", undefined, undefined, 0);
+    const xml = await readRawDocXml(p);
+    // Should have Heading2 style in the copied pPr and w:ins for tracking
+    expect(xml).toContain("Heading2");
+    expect(xml).toContain("w:ins");
+    expect(xml).toContain("Bob");
+  });
+
+  it("copy_format_from throws on invalid index", async () => {
+    const p = await createTmpDoc("Only one paragraph");
+    await expect(
+      insertParagraph(p, "Bad ref", -1, undefined, false, "Claude", undefined, undefined, 999),
+    ).rejects.toThrow(/out of range/);
+  });
+
+  it("copy_format_from a paragraph with no pPr produces plain paragraph", async () => {
+    const p = await createTmpDoc("No formatting here");
+    // Block 0 has no pPr — copy_format_from should fall back to no-format insert
+    await insertParagraph(p, "Plain copy", -1, undefined, false, "Claude", undefined, undefined, 0);
+    const xml = await readRawDocXml(p);
+    // The new paragraph should exist and have text, but no extra pPr
+    expect(xml).toContain("Plain copy");
+  });
+
+  it("copy_format_from a table block throws NOT_A_PARAGRAPH", async () => {
+    const { insertTable } = await import("../docx-engine.js");
+    const p = await createTmpDoc("Before table");
+    await insertTable(p, -1, 2, 2);
+    // Block 1 is now a table
+    await expect(
+      insertParagraph(p, "Bad", -1, undefined, false, "Claude", undefined, undefined, 1),
+    ).rejects.toThrow(/not a paragraph/);
+  });
+
+  it("copy_format_from strips stale revision markers from source pPr (tracked)", async () => {
+    const p = await createDocWithTrackedPPr("Source with tracked rPr");
+    // Block 0 has w:ins from OldAuthor in its pPr > rPr
+    await insertParagraph(p, "Fresh copy", -1, undefined, true, "NewAuthor", undefined, undefined, 0);
+    const xml = await readRawDocXml(p);
+    // Should NOT contain OldAuthor in the new paragraph's pPr
+    // The last w:ins in the doc should be from NewAuthor
+    const insMatches = [...xml.matchAll(/w:author="([^"]+)"/g)];
+    const authors = insMatches.map(m => m[1]);
+    // OldAuthor should appear only once (the original paragraph), NewAuthor for the copy
+    expect(authors.filter(a => a === "OldAuthor").length).toBe(1);
+    expect(authors.filter(a => a === "NewAuthor").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("copy_format_from + track_changes=false strips stale revision markers", async () => {
+    const p = await createDocWithTrackedPPr("Source with tracked rPr");
+    // Block 0 has w:ins from OldAuthor in its pPr > rPr
+    // Insert with track_changes=false — new paragraph must NOT carry OldAuthor's marker
+    await insertParagraph(p, "Untracked copy", -1, undefined, false, "Claude", undefined, undefined, 0);
+    const xml = await readRawDocXml(p);
+    // Count w:author="OldAuthor" — should appear only once (the original paragraph)
+    const oldAuthorMatches = [...xml.matchAll(/w:author="OldAuthor"/g)];
+    expect(oldAuthorMatches.length).toBe(1);
+  });
+
+  it("copy_format_from preserves alignment, indentation, and numPr", async () => {
+    const p = await createDocWithNumberedParagraph("第1条 定義", 14, 0, {
+      style: "Heading1",
+      alignment: "center",
+      indentLeft: 720,
+    });
+    // Copy format from block 0 to a new paragraph
+    await insertParagraph(p, "第2条 遡及適用", -1, undefined, false, "Claude", undefined, undefined, 0);
+    const xml = await readRawDocXml(p);
+    // Should have two paragraphs with Heading1, numId=14, center alignment, indent
+    expect((xml.match(/Heading1/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect((xml.match(/w:numId/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect((xml.match(/w:jc/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect((xml.match(/w:ind/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("copy_format_from overrides style and num_id when both provided", async () => {
+    const p = await createDocWithNumberedParagraph("Source", 14, 0, { style: "Heading1" });
+    // Provide style=Heading3 and num_id=99, but copy_format_from=0 should win
+    await insertParagraph(p, "Should get Heading1", -1, "Heading3", false, "Claude", 99, 1, 0);
+    const xml = await readRawDocXml(p);
+    // Heading3 and numId=99 should NOT appear; Heading1 and numId=14 should appear twice
+    expect(xml).not.toContain("Heading3");
+    expect(xml).not.toMatch(/w:numId[^>]*w:val="99"/);
+    expect((xml.match(/Heading1/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect((xml.match(/w:val="14"/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("num_level without num_id does not emit numPr", async () => {
+    const p = await createTmpDoc("Existing");
+    await insertParagraph(p, "No numbering", -1, undefined, false, "Claude", undefined, 2);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:numPr");
   });
 });
 

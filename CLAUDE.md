@@ -80,6 +80,26 @@ npx vitest run    # 全テスト実行
 
 書き込み関数は `withFileLock` でラップされており、同一ファイルへの並行書き込みを自動直列化する。読み取り関数はロック不要。
 
+## 番号付き段落の挿入
+
+Word のリスト定義による自動番号付き見出し（例: 第1条、第2条…）を `insert_paragraph` / `insert_paragraphs` で再現するには 2 つの方法がある。
+
+### 方法 A: `num_id` + `num_level` を明示指定
+
+```
+insert_paragraph(text="遡及適用", position=104, num_id=14, num_level=0)
+```
+
+`w:pPr` に `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="14"/></w:numPr>` が挿入される。`num_id` の値は既存段落の `read_document` 出力や document.xml から確認できる。`style` と併用可能。
+
+### 方法 B: `copy_format_from` で既存段落の書式をコピー
+
+```
+insert_paragraph(text="遡及適用", position=104, copy_format_from=103)
+```
+
+指定ブロックインデックスの `w:pPr` を丸ごと deep-copy する。番号定義・インデント・行間・罫線等すべてが引き継がれる。`copy_format_from` 指定時は `style` / `num_id` / `num_level` は無視される。
+
 ## アンチパターン
 
 - `read_document` で全体を読んでから書き換える → ブロックインデックスのずれが発生する。代わりに `search_text` で対象を特定してから最小範囲の編集を行う

@@ -31,6 +31,7 @@ import {
   findOne,
   el,
   textNode,
+  cloneNode,
 } from "./engine/xml-helpers.js";
 import {
   ErrorCode,
@@ -631,33 +632,31 @@ export async function editParagraphs(
 // Shared helper: build a new paragraph element
 // ---------------------------------------------------------------------------
 
-/** Build a w:p element with optional style and tracked insertion context. */
+/** Options for building a new paragraph beyond text and style. */
+interface BuildParagraphOptions {
+  numId?: number;
+  numLevel?: number;
+  /** Deep-cloned pPr from a source paragraph (copy_format_from). Overrides style/numId/numLevel. */
+  sourcePPr?: XNode;
+}
+
+/** Build a w:p element with optional style, numbering, copied format, and tracked insertion context. */
 function buildNewParagraph(
   text: string,
   style: string | undefined,
   ctx: RevisionContext | null,
+  opts?: BuildParagraphOptions,
 ): XNode {
   const pChildren: XNode[] = [];
 
-  if (ctx) {
-    const rPrIns = el("w:ins", [], {
-      "w:id": String(allocRevId(ctx)),
-      "w:author": ctx.author,
-      "w:date": ctx.date,
-    });
-    if (style) {
-      pChildren.push(
-        el("w:pPr", [
-          el("w:pStyle", [], { "w:val": style }),
-          el("w:rPr", [rPrIns]),
-        ]),
-      );
-    } else {
-      pChildren.push(el("w:pPr", [el("w:rPr", [rPrIns])]));
-    }
+  // Build the pPr element
+  const pPr = buildPPrForNewParagraph(style, ctx, opts);
+  if (pPr) pChildren.push(pPr);
 
+  // Build text runs
+  const lines = text.split("\n");
+  if (ctx) {
     const insRuns: XNode[] = [];
-    const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       if (i > 0) insRuns.push(el("w:r", [el("w:br")]));
       if (lines[i]) {
@@ -670,10 +669,6 @@ function buildNewParagraph(
     }
     pChildren.push(wrapInIns(insRuns, ctx));
   } else {
-    if (style) {
-      pChildren.push(el("w:pPr", [el("w:pStyle", [], { "w:val": style })]));
-    }
-    const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       if (i > 0) pChildren.push(el("w:r", [el("w:br")]));
       if (lines[i]) {
@@ -687,6 +682,85 @@ function buildNewParagraph(
   }
 
   return el("w:p", pChildren);
+}
+
+/**
+ * Build w:pPr for a new paragraph.
+ * If sourcePPr is provided (copy_format_from), deep-clone it and inject tracked change marker.
+ * Otherwise build from style + numId/numLevel.
+ */
+function buildPPrForNewParagraph(
+  style: string | undefined,
+  ctx: RevisionContext | null,
+  opts?: BuildParagraphOptions,
+): XNode | null {
+  if (opts?.sourcePPr) {
+    // Deep clone the source pPr
+    const pPr = cloneNode(opts.sourcePPr);
+    const pPrChildren = pPr["w:pPr"] as XNode[];
+
+    // Always strip stale revision markers from the cloned rPr —
+    // they belong to the source paragraph, not the new one.
+    const existingRPr = findOne(pPrChildren, "w:rPr");
+    if (existingRPr) {
+      const rPrChildren = existingRPr["w:rPr"] as XNode[];
+      for (let i = rPrChildren.length - 1; i >= 0; i--) {
+        if (rPrChildren[i]["w:ins"] !== undefined || rPrChildren[i]["w:del"] !== undefined) {
+          rPrChildren.splice(i, 1);
+        }
+      }
+      // Clean up empty rPr
+      if (rPrChildren.length === 0) {
+        const rPrIdx = pPrChildren.indexOf(existingRPr);
+        if (rPrIdx !== -1) pPrChildren.splice(rPrIdx, 1);
+      }
+    }
+
+    if (ctx) {
+      // Add our own w:ins marker for the new paragraph
+      let rPr = findOne(pPrChildren, "w:rPr");
+      if (!rPr) {
+        rPr = el("w:rPr");
+        pPrChildren.push(rPr);
+      }
+      (rPr["w:rPr"] as XNode[]).push(
+        el("w:ins", [], {
+          "w:id": String(allocRevId(ctx)),
+          "w:author": ctx.author,
+          "w:date": ctx.date,
+        }),
+      );
+    }
+    return pPr;
+  }
+
+  // Build pPr from scratch
+  const pPrChildren: XNode[] = [];
+
+  if (style) {
+    pPrChildren.push(el("w:pStyle", [], { "w:val": style }));
+  }
+
+  if (opts?.numId !== undefined) {
+    pPrChildren.push(
+      el("w:numPr", [
+        el("w:ilvl", [], { "w:val": String(opts.numLevel ?? 0) }),
+        el("w:numId", [], { "w:val": String(opts.numId) }),
+      ]),
+    );
+  }
+
+  if (ctx) {
+    const rPrIns = el("w:ins", [], {
+      "w:id": String(allocRevId(ctx)),
+      "w:author": ctx.author,
+      "w:date": ctx.date,
+    });
+    pPrChildren.push(el("w:rPr", [rPrIns]));
+  }
+
+  if (pPrChildren.length === 0) return null;
+  return el("w:pPr", pPrChildren);
 }
 
 /** Insert a paragraph element into body at the given position, handling sectPr and append. */
@@ -715,6 +789,9 @@ export async function insertParagraph(
   style?: string,
   trackChanges: boolean = true,
   author: string = "Claude",
+  numId?: number,
+  numLevel?: number,
+  copyFormatFrom?: number,
 ): Promise<string> {
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
@@ -726,7 +803,8 @@ export async function insertParagraph(
       ? newRevisionContext(scanMaxId(parsed) + 1, author)
       : null;
 
-    const newPara = buildNewParagraph(text, style, ctx);
+    const opts = resolveInsertOpts(body, bodyIdxs, numId, numLevel, copyFormatFrom);
+    const newPara = buildNewParagraph(text, style, ctx, opts);
     spliceNewParagraph(body, bodyIdxs, position, newPara);
 
     serializeDocXml(handle, parsed);
@@ -741,10 +819,48 @@ export async function insertParagraph(
 // 6b. insert_paragraphs (bulk)
 // ---------------------------------------------------------------------------
 
+/** Resolve BuildParagraphOptions from user-facing parameters. */
+function resolveInsertOpts(
+  body: XNode[],
+  bodyIdxs: number[],
+  numId?: number,
+  numLevel?: number,
+  copyFormatFrom?: number,
+): BuildParagraphOptions | undefined {
+  if (copyFormatFrom !== undefined) {
+    if (copyFormatFrom < 0 || copyFormatFrom >= bodyIdxs.length) {
+      throw new EngineError(
+        ErrorCode.INDEX_OUT_OF_RANGE,
+        `copy_format_from index ${copyFormatFrom} out of range (0–${bodyIdxs.length - 1}).`,
+      );
+    }
+    const srcEl = body[bodyIdxs[copyFormatFrom]];
+    if (!srcEl["w:p"]) {
+      throw new EngineError(
+        ErrorCode.NOT_A_PARAGRAPH,
+        `Block ${copyFormatFrom} is not a paragraph (copy_format_from must reference a paragraph).`,
+      );
+    }
+    const pPr = findOne(srcEl["w:p"] as XNode[], "w:pPr");
+    if (pPr) {
+      return { sourcePPr: pPr };
+    }
+    // Source paragraph has no pPr — nothing to copy
+    return undefined;
+  }
+  if (numId !== undefined) {
+    return { numId, numLevel };
+  }
+  return undefined;
+}
+
 export interface InsertParagraphItem {
   text: string;
   position: number;
   style?: string;
+  numId?: number;
+  numLevel?: number;
+  copyFormatFrom?: number;
 }
 
 export async function insertParagraphs(
@@ -777,8 +893,15 @@ export async function insertParagraphs(
       return posB - posA;
     });
 
+    // Resolve copy_format_from before any inserts (indices refer to original document)
+    const resolvedOpts = new Map<InsertParagraphItem, BuildParagraphOptions | undefined>();
     for (const item of sorted) {
-      const newPara = buildNewParagraph(item.text, item.style, ctx);
+      const opts = resolveInsertOpts(body, bodyIdxsForSort, item.numId, item.numLevel, item.copyFormatFrom);
+      resolvedOpts.set(item, opts);
+    }
+
+    for (const item of sorted) {
+      const newPara = buildNewParagraph(item.text, item.style, ctx, resolvedOpts.get(item));
       // Recalculate indices after each splice to avoid stale mapping
       const currentBodyIdxs = blockBodyIndices(body);
       spliceNewParagraph(body, currentBodyIdxs, item.position, newPara);
