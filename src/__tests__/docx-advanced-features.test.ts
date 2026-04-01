@@ -10,6 +10,7 @@ import {
   readHeaderFooter,
   readFootnotes,
   editTableCell,
+  editParagraph,
   replaceText,
   readDocument,
   insertTable,
@@ -82,6 +83,31 @@ describe("editTableCell", () => {
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:delText");
     expect(xml).toContain("w:ins");
+  });
+
+  it("editTableCell tracked changes survive a subsequent editParagraph round-trip", async () => {
+    const p = await createTmpDoc("Paragraph text");
+    await insertTable(p, -1, 1, 1, [["Original cell"]]);
+    // Step 1: edit table cell with tracked changes
+    await editTableCell(p, 1, 0, 0, "Changed cell", true);
+    // Verify tracked changes are present after step 1
+    const xmlAfterTableEdit = await readRawDocXml(p);
+    expect(xmlAfterTableEdit).toContain("w:delText");
+    expect(xmlAfterTableEdit).toContain("w:ins");
+
+    // Step 2: edit paragraph (triggers parse -> serialize round-trip)
+    await editParagraph(p, 0, "Updated paragraph", true);
+
+    // Verify table cell tracked changes survive the round-trip
+    const xmlAfterBothEdits = await readRawDocXml(p);
+    // The table should still contain w:del with "Original" (delText) and w:ins with "Changed"
+    expect(xmlAfterBothEdits).toContain("w:delText");
+    // Check revision view shows both tracked changes
+    const rev = await readDocument(p, undefined, undefined, true);
+    expect(rev).toContain("[-Original-]");
+    expect(rev).toContain("[+Changed+]");
+    expect(rev).toContain("[-Paragraph text-]");
+    expect(rev).toContain("[+Updated paragraph+]");
   });
 
   it("throws INDEX_OUT_OF_RANGE for bad block index", async () => {

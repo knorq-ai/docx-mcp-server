@@ -104,5 +104,5 @@ export function textNode(text: string): XNode {
 }
 
 export function cloneNode(node: XNode): XNode {
-  return JSON.parse(JSON.stringify(node));
+  return structuredClone(node);
 }

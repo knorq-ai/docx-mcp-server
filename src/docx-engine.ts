@@ -1040,25 +1040,26 @@ export async function deleteParagraphs(
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
 
-    // Validate all indices upfront
-    for (const idx of paragraphIndices) {
+    // Deduplicate indices upfront
+    const unique = [...new Set(paragraphIndices)];
+
+    // Validate all indices
+    for (const idx of unique) {
       if (idx < 0 || idx >= bodyIdxs.length) {
         throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${idx} out of range (0–${bodyIdxs.length - 1}).`);
       }
     }
 
-    const count = paragraphIndices.length;
-
     if (trackChanges) {
       const maxId = scanMaxId(parsed);
       const ctx = newRevisionContext(maxId + 1, author);
 
-      for (const idx of paragraphIndices) {
+      for (const idx of unique) {
         markBlockAsDeleted(body[bodyIdxs[idx]], ctx);
       }
     } else {
-      // Hard delete: deduplicate and sort descending to avoid index shifting
-      const sorted = [...new Set(paragraphIndices)].sort((a, b) => b - a);
+      // Hard delete: sort descending to avoid index shifting
+      const sorted = unique.sort((a, b) => b - a);
       for (const idx of sorted) {
         body.splice(bodyIdxs[idx], 1);
       }
@@ -1068,7 +1069,7 @@ export async function deleteParagraphs(
     await saveDocx(handle);
 
     const mode = trackChanges ? " (tracked)" : "";
-    return `Deleted ${count} block(s) from ${path.basename(filePath)}${mode}.`;
+    return `Deleted ${unique.length} block(s) from ${path.basename(filePath)}${mode}.`;
   });
 }
 
@@ -2357,53 +2358,14 @@ export async function readHeaderFooter(filePath: string): Promise<string> {
 // Shared helper: replace cell text content in-place
 // ---------------------------------------------------------------------------
 
-/** Replace the text content of a cell's first paragraph, preserving pPr. */
+/** Replace the text content of a cell's first paragraph, preserving pPr and structural elements. */
 function replaceCellText(
   paraEl: XNode,
   newText: string,
   ctx: RevisionContext | null,
 ): void {
-  const pChildren = paraEl["w:p"] as XNode[];
-  const pPr = findOne(pChildren, "w:pPr");
-
-  if (ctx) {
-    let oldText = "";
-    let firstRPr: XNode | null = null;
-    for (const child of pChildren) {
-      if (child["w:r"]) {
-        const runC = child["w:r"] as XNode[];
-        const rPr = getRunRPr(runC);
-        if (!firstRPr && rPr) firstRPr = rPr;
-        oldText += extractRunText(runC);
-      } else if (child["w:ins"]) {
-        for (const insChild of child["w:ins"]) {
-          if (insChild["w:r"]) {
-            const runC = insChild["w:r"] as XNode[];
-            const rPr = getRunRPr(runC);
-            if (!firstRPr && rPr) firstRPr = rPr;
-            oldText += extractRunText(runC);
-          }
-        }
-      }
-    }
-
-    const diff = computeMinimalDiff(oldText, newText);
-    const newChildren: XNode[] = [];
-    if (pPr) newChildren.push(pPr);
-    if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
-    if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
-    if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
-    if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
-    paraEl["w:p"] = newChildren;
-  } else {
-    const newRun = el("w:r", [
-      el("w:t", [textNode(newText)], { "xml:space": "preserve" }),
-    ]);
-    const newChildren: XNode[] = [];
-    if (pPr) newChildren.push(pPr);
-    newChildren.push(newRun);
-    paraEl["w:p"] = newChildren;
-  }
+  // Delegate to replaceParagraphText which handles structural element preservation
+  replaceParagraphText(paraEl, newText, ctx);
 }
 
 /** Navigate to a specific cell in a table block and return its first paragraph element. */
@@ -2506,18 +2468,19 @@ export async function editTableCells(
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
 
-    // Validate all cells upfront
+    // Validate all cells upfront and collect paragraph references
+    const targets: { paraEl: XNode; newText: string }[] = [];
     for (const edit of edits) {
-      getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
+      const paraEl = getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
+      targets.push({ paraEl, newText: edit.newText });
     }
 
     const ctx = trackChanges
       ? newRevisionContext(scanMaxId(parsed) + 1, author)
       : null;
 
-    for (const edit of edits) {
-      const paraEl = getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
-      replaceCellText(paraEl, edit.newText, ctx);
+    for (const { paraEl, newText } of targets) {
+      replaceCellText(paraEl, newText, ctx);
     }
 
     serializeDocXml(handle, parsed);
