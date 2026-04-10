@@ -735,91 +735,70 @@ function replaceInChildrenTracked(
 // Accept / reject changes helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Accept all tracked changes: remove w:del elements entirely,
- * unwrap w:ins so their runs become normal paragraph children.
- */
-export function acceptChangesInNodes(nodes: XNode[]): void {
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const node = nodes[i];
-    if (node["w:del"]) {
-      // Delete the entire w:del element (accept = remove deleted text)
-      nodes.splice(i, 1);
-    } else if (node["w:ins"]) {
-      // Unwrap: replace w:ins with its child runs
-      const insChildren = node["w:ins"] as XNode[];
-      const runs = insChildren.filter(
-        (c: XNode) => c["w:r"] !== undefined,
-      );
-      nodes.splice(i, 1, ...runs);
-    } else if (node["w:p"]) {
-      // Recurse into paragraphs
-      const pChildren = node["w:p"] as XNode[];
-      acceptChangesInNodes(pChildren);
-      // Remove pPr > rPr > w:del and w:ins markers
-      cleanParagraphRevisionMarkers(pChildren);
-    } else if (node["w:tbl"]) {
-      // Recurse into table cells
-      const rows = findAll(node["w:tbl"], "w:tr");
-      for (const row of rows) {
-        const cells = findAll(row["w:tr"], "w:tc");
-        for (const cell of cells) {
-          const paras = findAll(cell["w:tc"], "w:p");
-          for (const p of paras) {
-            acceptChangesInNodes(p["w:p"]);
-            cleanParagraphRevisionMarkers(p["w:p"]);
-          }
-        }
-      }
+// ---------------------------------------------------------------------------
+// Shared helpers for revision property cleanup
+// ---------------------------------------------------------------------------
+
+/** Tags that are move/revision range markers — should be removed on accept/reject. */
+const RANGE_MARKER_TAGS = new Set([
+  "w:moveFromRangeStart",
+  "w:moveFromRangeEnd",
+  "w:moveToRangeStart",
+  "w:moveToRangeEnd",
+]);
+
+function isRangeMarker(node: XNode): boolean {
+  for (const tag of RANGE_MARKER_TAGS) {
+    if (node[tag] !== undefined) return true;
+  }
+  return false;
+}
+
+/** Remove a *Change element from a property container (accept mode — keep current props). */
+function stripChangeElement(propChildren: XNode[], changeTag: string): void {
+  for (let i = propChildren.length - 1; i >= 0; i--) {
+    if (propChildren[i][changeTag] !== undefined) {
+      propChildren.splice(i, 1);
     }
   }
 }
 
-/**
- * Reject all tracked changes: remove w:ins elements entirely,
- * unwrap w:del so their runs become normal (converting w:delText → w:t).
- */
-export function rejectChangesInNodes(nodes: XNode[]): void {
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const node = nodes[i];
-    if (node["w:ins"]) {
-      // Remove the entire w:ins element (reject = remove inserted text)
-      nodes.splice(i, 1);
-    } else if (node["w:del"]) {
-      // Unwrap: replace w:del with its child runs, converting delText → t
-      const delChildren = node["w:del"] as XNode[];
-      const runs: XNode[] = [];
-      for (const dc of delChildren) {
-        if (dc["w:r"]) {
-          const runC = dc["w:r"] as XNode[];
-          // Convert w:delText to w:t
-          for (const rc of runC) {
-            if (rc["w:delText"]) {
-              const text = rc["w:delText"];
-              delete rc["w:delText"];
-              rc["w:t"] = text;
-            }
-          }
-          runs.push(dc);
-        }
-      }
-      nodes.splice(i, 1, ...runs);
-    } else if (node["w:p"]) {
-      const pChildren = node["w:p"] as XNode[];
-      rejectChangesInNodes(pChildren);
-      cleanParagraphRevisionMarkers(pChildren);
-    } else if (node["w:tbl"]) {
-      const rows = findAll(node["w:tbl"], "w:tr");
-      for (const row of rows) {
-        const cells = findAll(row["w:tr"], "w:tc");
-        for (const cell of cells) {
-          const paras = findAll(cell["w:tc"], "w:p");
-          for (const p of paras) {
-            rejectChangesInNodes(p["w:p"]);
-            cleanParagraphRevisionMarkers(p["w:p"]);
-          }
-        }
-      }
+/** Replace current properties with old ones stored in a *Change element (reject mode). */
+function restoreFromChangeElement(
+  propChildren: XNode[],
+  changeTag: string,
+  innerTag: string,
+): void {
+  const changeNode = findOne(propChildren, changeTag);
+  if (!changeNode) return;
+  const changeChildren = changeNode[changeTag] as XNode[];
+  const oldProp = findOne(changeChildren, innerTag);
+  // Remove the change element
+  const idx = propChildren.indexOf(changeNode);
+  if (idx !== -1) propChildren.splice(idx, 1);
+  if (oldProp) {
+    const oldChildren = oldProp[innerTag] as XNode[];
+    propChildren.length = 0;
+    propChildren.push(...oldChildren);
+  }
+}
+
+/** Strip w:rPrChange from every w:r > w:rPr (accept mode). */
+function stripRunPropertyChanges(pChildren: XNode[]): void {
+  for (const child of pChildren) {
+    if (child["w:r"]) {
+      const rPr = findOne(child["w:r"] as XNode[], "w:rPr");
+      if (rPr) stripChangeElement(rPr["w:rPr"] as XNode[], "w:rPrChange");
+    }
+  }
+}
+
+/** Restore w:rPr from w:rPrChange for every run (reject mode). */
+function restoreRunPropertyChanges(pChildren: XNode[]): void {
+  for (const child of pChildren) {
+    if (child["w:r"]) {
+      const rPr = findOne(child["w:r"] as XNode[], "w:rPr");
+      if (rPr) restoreFromChangeElement(rPr["w:rPr"] as XNode[], "w:rPrChange", "w:rPr");
     }
   }
 }
@@ -837,10 +816,151 @@ function cleanParagraphRevisionMarkers(pChildren: XNode[]): void {
       rPrChildren.splice(i, 1);
     }
   }
-  // Clean up empty rPr
   if (rPrChildren.length === 0) {
     const rPrIdx = pPrChildren.indexOf(rPr);
     if (rPrIdx !== -1) pPrChildren.splice(rPrIdx, 1);
+  }
+}
+
+/** Post-process a paragraph after the main accept pass. */
+function postProcessParagraphAccept(pChildren: XNode[]): void {
+  cleanParagraphRevisionMarkers(pChildren);
+  const pPr = findOne(pChildren, "w:pPr");
+  if (pPr) stripChangeElement(pPr["w:pPr"] as XNode[], "w:pPrChange");
+  stripRunPropertyChanges(pChildren);
+}
+
+/** Post-process a paragraph after the main reject pass. */
+function postProcessParagraphReject(pChildren: XNode[]): void {
+  cleanParagraphRevisionMarkers(pChildren);
+  const pPr = findOne(pChildren, "w:pPr");
+  if (pPr) restoreFromChangeElement(pPr["w:pPr"] as XNode[], "w:pPrChange", "w:pPr");
+  restoreRunPropertyChanges(pChildren);
+}
+
+/** Accept tracked changes within a table (properties, rows, cells, paragraphs). */
+function acceptChangesInTable(tblChildren: XNode[]): void {
+  const tblPr = findOne(tblChildren, "w:tblPr");
+  if (tblPr) stripChangeElement(tblPr["w:tblPr"] as XNode[], "w:tblPrChange");
+  const rows = findAll(tblChildren, "w:tr");
+  for (const row of rows) {
+    const trChildren = row["w:tr"] as XNode[];
+    const trPr = findOne(trChildren, "w:trPr");
+    if (trPr) {
+      stripChangeElement(trPr["w:trPr"] as XNode[], "w:trPrChange");
+      stripChangeElement(trPr["w:trPr"] as XNode[], "w:ins");
+      stripChangeElement(trPr["w:trPr"] as XNode[], "w:del");
+    }
+    const cells = findAll(trChildren, "w:tc");
+    for (const cell of cells) {
+      const tcChildren = cell["w:tc"] as XNode[];
+      const tcPr = findOne(tcChildren, "w:tcPr");
+      if (tcPr) stripChangeElement(tcPr["w:tcPr"] as XNode[], "w:tcPrChange");
+      acceptChangesInNodes(tcChildren);
+    }
+  }
+}
+
+/** Reject tracked changes within a table. */
+function rejectChangesInTable(tblChildren: XNode[]): void {
+  const tblPr = findOne(tblChildren, "w:tblPr");
+  if (tblPr) restoreFromChangeElement(tblPr["w:tblPr"] as XNode[], "w:tblPrChange", "w:tblPr");
+  const rows = findAll(tblChildren, "w:tr");
+  for (const row of rows) {
+    const trChildren = row["w:tr"] as XNode[];
+    const trPr = findOne(trChildren, "w:trPr");
+    if (trPr) {
+      restoreFromChangeElement(trPr["w:trPr"] as XNode[], "w:trPrChange", "w:trPr");
+      stripChangeElement(trPr["w:trPr"] as XNode[], "w:ins");
+      stripChangeElement(trPr["w:trPr"] as XNode[], "w:del");
+    }
+    const cells = findAll(trChildren, "w:tc");
+    for (const cell of cells) {
+      const tcChildren = cell["w:tc"] as XNode[];
+      const tcPr = findOne(tcChildren, "w:tcPr");
+      if (tcPr) restoreFromChangeElement(tcPr["w:tcPr"] as XNode[], "w:tcPrChange", "w:tcPr");
+      rejectChangesInNodes(tcChildren);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Accept / reject — main traversal
+// ---------------------------------------------------------------------------
+
+/**
+ * Accept all tracked changes: remove w:del/w:moveFrom elements entirely,
+ * unwrap w:ins/w:moveTo so their children become normal content,
+ * and strip all *Change revision properties.
+ */
+export function acceptChangesInNodes(nodes: XNode[]): void {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const node = nodes[i];
+    if (node["w:del"] || node["w:moveFrom"]) {
+      nodes.splice(i, 1);
+    } else if (node["w:ins"] || node["w:moveTo"]) {
+      const tag = node["w:ins"] !== undefined ? "w:ins" : "w:moveTo";
+      const children = node[tag] as XNode[];
+      nodes.splice(i, 1, ...children);
+    } else if (isRangeMarker(node)) {
+      nodes.splice(i, 1);
+    } else if (node["w:p"]) {
+      const pChildren = node["w:p"] as XNode[];
+      acceptChangesInNodes(pChildren);
+      postProcessParagraphAccept(pChildren);
+    } else if (node["w:tbl"]) {
+      acceptChangesInTable(node["w:tbl"]);
+    } else if (node["w:sdt"]) {
+      const sdtContent = findOne(node["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) acceptChangesInNodes(sdtContent["w:sdtContent"]);
+    } else if (node["w:sectPr"]) {
+      stripChangeElement(node["w:sectPr"] as XNode[], "w:sectPrChange");
+    }
+  }
+}
+
+/**
+ * Reject all tracked changes: remove w:ins/w:moveTo elements entirely,
+ * unwrap w:del/w:moveFrom so their runs become normal (converting w:delText → w:t),
+ * and restore old properties from *Change elements.
+ */
+export function rejectChangesInNodes(nodes: XNode[]): void {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const node = nodes[i];
+    if (node["w:ins"] || node["w:moveTo"]) {
+      nodes.splice(i, 1);
+    } else if (node["w:del"] || node["w:moveFrom"]) {
+      const tag = node["w:del"] !== undefined ? "w:del" : "w:moveFrom";
+      const delChildren = node[tag] as XNode[];
+      const runs: XNode[] = [];
+      for (const dc of delChildren) {
+        if (dc["w:r"]) {
+          const runC = dc["w:r"] as XNode[];
+          for (const rc of runC) {
+            if (rc["w:delText"]) {
+              const text = rc["w:delText"];
+              delete rc["w:delText"];
+              rc["w:t"] = text;
+            }
+          }
+          runs.push(dc);
+        }
+      }
+      nodes.splice(i, 1, ...runs);
+    } else if (isRangeMarker(node)) {
+      nodes.splice(i, 1);
+    } else if (node["w:p"]) {
+      const pChildren = node["w:p"] as XNode[];
+      rejectChangesInNodes(pChildren);
+      postProcessParagraphReject(pChildren);
+    } else if (node["w:tbl"]) {
+      rejectChangesInTable(node["w:tbl"]);
+    } else if (node["w:sdt"]) {
+      const sdtContent = findOne(node["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) rejectChangesInNodes(sdtContent["w:sdtContent"]);
+    } else if (node["w:sectPr"]) {
+      restoreFromChangeElement(node["w:sectPr"] as XNode[], "w:sectPrChange", "w:sectPr");
+    }
   }
 }
 

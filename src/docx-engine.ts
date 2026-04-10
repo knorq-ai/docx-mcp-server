@@ -2292,6 +2292,9 @@ export async function acceptAllChanges(filePath: string): Promise<string> {
 
     acceptChangesInNodes(body);
 
+    // Process headers and footers
+    await processHeaderFooterChanges(handle, acceptChangesInNodes);
+
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
 
@@ -2311,11 +2314,33 @@ export async function rejectAllChanges(filePath: string): Promise<string> {
 
     rejectChangesInNodes(body);
 
+    // Process headers and footers
+    await processHeaderFooterChanges(handle, rejectChangesInNodes);
+
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
 
     return `Rejected all tracked changes in ${path.basename(filePath)}.`;
   });
+}
+
+/** Apply a change-processing function to all headers and footers in the document. */
+async function processHeaderFooterChanges(
+  handle: DocxHandle,
+  processFn: (nodes: XNode[]) => void,
+): Promise<void> {
+  const hfFiles = getHeaderFooterFiles(handle);
+  for (const hfFile of hfFiles) {
+    const hfXml = await handle.zip.file(hfFile)?.async("string");
+    if (!hfXml) continue;
+    const hfParsed: XNode[] = parser.parse(hfXml);
+    const rootEl = hfParsed.find((n: XNode) => n["w:hdr"] || n["w:ftr"]);
+    if (!rootEl) continue;
+    const hfChildren = rootEl["w:hdr"] ?? rootEl["w:ftr"];
+    processFn(hfChildren);
+    const updatedXml = builder.build(hfParsed);
+    handle.zip.file(hfFile, updatedXml);
+  }
 }
 
 // ---------------------------------------------------------------------------

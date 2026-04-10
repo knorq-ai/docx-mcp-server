@@ -4,8 +4,15 @@ import {
   createTmpDoc,
   cleanupTmpFiles,
   readRawDocXml,
+  readRawHeaderXml,
   tmpDocxPath,
   trackTmpFile,
+  createDocWithMoveTracking,
+  createDocWithRPrChange,
+  createDocWithPPrChange,
+  createDocWithSectPrChange,
+  createDocWithTrackedSdt,
+  createDocWithTrackedHeader,
 } from "./helpers.js";
 import {
   createDocument,
@@ -441,5 +448,191 @@ describe("rejectAllChanges", () => {
     const xml = await readRawDocXml(p);
     expect(xml).not.toContain("w:ins");
     expect(xml).not.toContain("w:del");
+  });
+});
+
+// =========================================================================
+// acceptAllChanges — move tracking (w:moveFrom / w:moveTo)
+// =========================================================================
+
+describe("acceptAllChanges — move tracking", () => {
+  it("removes w:moveFrom and unwraps w:moveTo", async () => {
+    const p = await createDocWithMoveTracking("Hello ", "world", " end");
+    let xml = await readRawDocXml(p);
+    expect(xml).toContain("w:moveFrom");
+    expect(xml).toContain("w:moveTo");
+
+    await acceptAllChanges(p);
+
+    xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:moveFrom");
+    expect(xml).not.toContain("w:moveTo");
+    expect(xml).not.toContain("w:moveFromRangeStart");
+    expect(xml).not.toContain("w:moveFromRangeEnd");
+    expect(xml).not.toContain("w:moveToRangeStart");
+    expect(xml).not.toContain("w:moveToRangeEnd");
+  });
+
+  it("keeps moved text at destination after accept", async () => {
+    const p = await createDocWithMoveTracking("Hello ", "world", " end");
+    await acceptAllChanges(p);
+    const doc = await readDocument(p);
+    // The moved text should appear at the destination (second paragraph)
+    expect(doc).toContain("world");
+  });
+});
+
+// =========================================================================
+// rejectAllChanges — move tracking
+// =========================================================================
+
+describe("rejectAllChanges — move tracking", () => {
+  it("removes w:moveTo and unwraps w:moveFrom", async () => {
+    const p = await createDocWithMoveTracking("Hello ", "world", " end");
+    await rejectAllChanges(p);
+
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:moveFrom");
+    expect(xml).not.toContain("w:moveTo");
+    expect(xml).not.toContain("w:moveFromRangeStart");
+    expect(xml).not.toContain("w:moveToRangeStart");
+  });
+
+  it("restores text at original position after reject", async () => {
+    const p = await createDocWithMoveTracking("Hello ", "world", " end");
+    await rejectAllChanges(p);
+    const doc = await readDocument(p);
+    // The moved text should stay at original location
+    expect(doc).toContain("world");
+  });
+});
+
+// =========================================================================
+// acceptAllChanges — w:rPrChange (formatting change tracking)
+// =========================================================================
+
+describe("acceptAllChanges — rPrChange", () => {
+  it("strips w:rPrChange from run properties", async () => {
+    const p = await createDocWithRPrChange("Bold text");
+    let xml = await readRawDocXml(p);
+    expect(xml).toContain("w:rPrChange");
+
+    await acceptAllChanges(p);
+
+    xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:rPrChange");
+    // The current formatting (bold) should remain
+    expect(xml).toContain("w:b");
+  });
+});
+
+// =========================================================================
+// rejectAllChanges — w:rPrChange
+// =========================================================================
+
+describe("rejectAllChanges — rPrChange", () => {
+  it("strips w:rPrChange and restores old formatting", async () => {
+    const p = await createDocWithRPrChange("Was plain text");
+    await rejectAllChanges(p);
+
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:rPrChange");
+    // The bold formatting should be reverted (old rPr was empty)
+    expect(xml).not.toContain("<w:b/>");
+    expect(xml).not.toContain("<w:b>");
+  });
+});
+
+// =========================================================================
+// acceptAllChanges — w:pPrChange (paragraph property change tracking)
+// =========================================================================
+
+describe("acceptAllChanges — pPrChange", () => {
+  it("strips w:pPrChange from paragraph properties", async () => {
+    const p = await createDocWithPPrChange("Centered text");
+    let xml = await readRawDocXml(p);
+    expect(xml).toContain("w:pPrChange");
+
+    await acceptAllChanges(p);
+
+    xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:pPrChange");
+    // Current alignment (center) should remain
+    expect(xml).toContain("center");
+  });
+});
+
+// =========================================================================
+// rejectAllChanges — w:pPrChange
+// =========================================================================
+
+describe("rejectAllChanges — pPrChange", () => {
+  it("restores old paragraph properties from pPrChange", async () => {
+    const p = await createDocWithPPrChange("Was left-aligned");
+    await rejectAllChanges(p);
+
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:pPrChange");
+    // Alignment should be reverted to left
+    expect(xml).toContain("left");
+    expect(xml).not.toContain("center");
+  });
+});
+
+// =========================================================================
+// acceptAllChanges — w:sectPrChange
+// =========================================================================
+
+describe("acceptAllChanges — sectPrChange", () => {
+  it("strips w:sectPrChange from section properties", async () => {
+    const p = await createDocWithSectPrChange("Some text");
+    let xml = await readRawDocXml(p);
+    expect(xml).toContain("w:sectPrChange");
+
+    await acceptAllChanges(p);
+
+    xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:sectPrChange");
+  });
+});
+
+// =========================================================================
+// acceptAllChanges — tracked changes inside w:sdt
+// =========================================================================
+
+describe("acceptAllChanges — SDT container", () => {
+  it("accepts tracked changes inside structured document tags", async () => {
+    const p = await createDocWithTrackedSdt("old text", "new text");
+    let xml = await readRawDocXml(p);
+    expect(xml).toContain("w:del");
+    expect(xml).toContain("w:ins");
+
+    await acceptAllChanges(p);
+
+    xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:del");
+    expect(xml).not.toContain("w:ins");
+    const doc = await readDocument(p);
+    expect(doc).toContain("new text");
+    expect(doc).not.toContain("old text");
+  });
+});
+
+// =========================================================================
+// acceptAllChanges — tracked changes in headers/footers
+// =========================================================================
+
+describe("acceptAllChanges — headers/footers", () => {
+  it("accepts tracked changes in headers", async () => {
+    const p = await createDocWithTrackedHeader("Body text", "old header", "new header");
+    let hdrXml = await readRawHeaderXml(p);
+    expect(hdrXml).toContain("w:del");
+    expect(hdrXml).toContain("w:ins");
+
+    await acceptAllChanges(p);
+
+    hdrXml = await readRawHeaderXml(p);
+    expect(hdrXml).not.toContain("w:del");
+    expect(hdrXml).not.toContain("w:ins");
   });
 });

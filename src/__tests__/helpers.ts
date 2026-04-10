@@ -603,6 +603,239 @@ export async function createDocWithTrackedPPr(text: string): Promise<string> {
   return p;
 }
 
+/**
+ * Create a doc with w:moveFrom / w:moveTo tracked changes (Word move tracking).
+ * Simulates text being moved from one location to another with tracking enabled.
+ */
+export async function createDocWithMoveTracking(
+  beforeText: string,
+  movedText: string,
+  afterText: string,
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:r><w:t xml:space="preserve">${escapeXml(beforeText)}</w:t></w:r>
+  <w:moveFromRangeStart w:id="10" w:name="move1" w:author="User" w:date="2024-01-01T00:00:00Z"/>
+  <w:moveFrom w:id="11" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:r><w:rPr/><w:delText xml:space="preserve">${escapeXml(movedText)}</w:delText></w:r>
+  </w:moveFrom>
+  <w:moveFromRangeEnd w:id="10"/>
+  <w:r><w:t xml:space="preserve">${escapeXml(afterText)}</w:t></w:r>
+</w:p>
+<w:p>
+  <w:moveToRangeStart w:id="12" w:name="move1" w:author="User" w:date="2024-01-01T00:00:00Z"/>
+  <w:moveTo w:id="13" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:r><w:t xml:space="preserve">${escapeXml(movedText)}</w:t></w:r>
+  </w:moveTo>
+  <w:moveToRangeEnd w:id="12"/>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+/**
+ * Create a doc with w:rPrChange (run formatting change tracking).
+ * Simulates a formatting change (e.g. adding bold) that is tracked.
+ */
+export async function createDocWithRPrChange(
+  text: string,
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:r>
+    <w:rPr>
+      <w:b/>
+      <w:rPrChange w:id="20" w:author="User" w:date="2024-01-01T00:00:00Z">
+        <w:rPr/>
+      </w:rPrChange>
+    </w:rPr>
+    <w:t xml:space="preserve">${escapeXml(text)}</w:t>
+  </w:r>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+/**
+ * Create a doc with w:pPrChange (paragraph property change tracking).
+ * Simulates a paragraph alignment change that is tracked.
+ */
+export async function createDocWithPPrChange(
+  text: string,
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:pPr>
+    <w:jc w:val="center"/>
+    <w:pPrChange w:id="30" w:author="User" w:date="2024-01-01T00:00:00Z">
+      <w:pPr>
+        <w:jc w:val="left"/>
+      </w:pPr>
+    </w:pPrChange>
+  </w:pPr>
+  <w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+/**
+ * Create a doc with w:sectPrChange (section property change tracking).
+ */
+export async function createDocWithSectPrChange(
+  text: string,
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>
+<w:sectPr>
+  <w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>
+  <w:sectPrChange w:id="40" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+    </w:sectPr>
+  </w:sectPrChange>
+</w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+/**
+ * Create a doc with tracked changes inside a w:sdt (structured document tag).
+ */
+export async function createDocWithTrackedSdt(
+  originalText: string,
+  newText: string,
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:sdt>
+  <w:sdtPr><w:tag w:val="field1"/></w:sdtPr>
+  <w:sdtContent>
+    <w:p>
+      <w:del w:id="50" w:author="User" w:date="2024-01-01T00:00:00Z">
+        <w:r><w:delText xml:space="preserve">${escapeXml(originalText)}</w:delText></w:r>
+      </w:del>
+      <w:ins w:id="51" w:author="User" w:date="2024-01-01T00:00:00Z">
+        <w:r><w:t xml:space="preserve">${escapeXml(newText)}</w:t></w:r>
+      </w:ins>
+    </w:p>
+  </w:sdtContent>
+</w:sdt>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+/**
+ * Create a doc with tracked changes in a header.
+ */
+export async function createDocWithTrackedHeader(
+  bodyText: string,
+  oldHeaderText: string,
+  newHeaderText: string,
+): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:r><w:t xml:space="preserve">${escapeXml(bodyText)}</w:t></w:r></w:p>
+<w:sectPr>
+  <w:headerReference w:type="default" r:id="rId2"/>
+  <w:pgSz w:w="11906" w:h="16838"/>
+</w:sectPr>
+</w:body>
+</w:document>`;
+  const headerXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:p>
+  <w:del w:id="60" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:r><w:delText xml:space="preserve">${escapeXml(oldHeaderText)}</w:delText></w:r>
+  </w:del>
+  <w:ins w:id="61" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:r><w:t xml:space="preserve">${escapeXml(newHeaderText)}</w:t></w:r>
+  </w:ins>
+</w:p>
+</w:hdr>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+</w:styles>`;
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+</Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+</Relationships>`;
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", contentTypesXml);
+  zip.file("_rels/.rels", relsXml);
+  zip.file("word/document.xml", documentXml);
+  zip.file("word/styles.xml", stylesXml);
+  zip.file("word/header1.xml", headerXml);
+  zip.file("word/_rels/document.xml.rels", docRelsXml);
+  const buf = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  await fs.writeFile(p, buf);
+  return p;
+}
+
+/** Read raw header XML from a .docx file */
+export async function readRawHeaderXml(filePath: string, headerFile: string = "word/header1.xml"): Promise<string> {
+  const data = await fs.readFile(filePath);
+  const zip = await JSZip.loadAsync(data);
+  const xml = await zip.file(headerFile)?.async("string");
+  return xml ?? "";
+}
+
 export async function writeMinimalDocx(filePath: string, documentXml: string): Promise<void> {
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
