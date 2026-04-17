@@ -45,7 +45,7 @@
 ### 方法 1: npm からインストール
 
 ```bash
-npm install -g @llamadrive/docx-mcp-server
+npm install -g @knorq/docx-mcp-server
 ```
 
 MCP 設定に追加する（下記 [設定](#設定) を参照）。
@@ -59,7 +59,7 @@ MCP 設定に追加する（下記 [設定](#設定) を参照）。
   "mcpServers": {
     "docx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/docx-mcp-server"]
+      "args": ["-y", "@knorq/docx-mcp-server"]
     }
   }
 }
@@ -86,7 +86,7 @@ npm link        # docx-mcp-server コマンドをグローバルに登録
   "mcpServers": {
     "docx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/docx-mcp-server"]
+      "args": ["-y", "@knorq/docx-mcp-server"]
     }
   }
 }
@@ -101,7 +101,7 @@ Cursor の MCP サーバ設定に追加する:
   "mcpServers": {
     "docx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/docx-mcp-server"]
+      "args": ["-y", "@knorq/docx-mcp-server"]
     }
   }
 }

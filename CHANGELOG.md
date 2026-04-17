@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.0] — 2026-04-17
 
 ### Changed (BREAKING)
-- Renamed package from `docx-mcp-server` to `@llamadrive/docx-mcp-server`. Update your `.mcp.json` / install commands to the scoped name.
+- Renamed package from `docx-mcp-server` to `@knorq/docx-mcp-server`. Update your `.mcp.json` / install commands to the scoped name.
 - Pinned `engines.node` to `>=18.0.0`.
 - `track_changes` now defaults to `true` at the schema level on every editing tool (`replace_text`, `edit_paragraph`, `edit_paragraphs`, `insert_paragraph`, `insert_paragraphs`, `delete_paragraph`, `delete_paragraphs`, `edit_table_cell`, `edit_table_cells`). Previously the default lived only in the engine; the schema treated the field as optional, so an LLM passing `false` could silently slip through.
 - Setting `track_changes: false` now requires also passing `allow_untracked_edit: true`. Without the second flag the call fails with `UNTRACKED_EDIT_NOT_ALLOWED`. This is a safety guard for regulated-industry use: prompt injection or long-context drift cannot ship silent edits unless two independent flags are set.
