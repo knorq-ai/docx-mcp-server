@@ -24,6 +24,7 @@ export const ErrorCode = {
   NOT_A_TABLE: "NOT_A_TABLE",
   ANCHOR_NOT_FOUND: "ANCHOR_NOT_FOUND",
   INVALID_PARAMETER: "INVALID_PARAMETER",
+  UNTRACKED_EDIT_NOT_ALLOWED: "UNTRACKED_EDIT_NOT_ALLOWED",
 } as const;
 
 export type ErrorCodeType = (typeof ErrorCode)[keyof typeof ErrorCode];

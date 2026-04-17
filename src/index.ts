@@ -47,6 +47,7 @@ import {
   readFootnotes,
   listImages,
   EngineError,
+  ErrorCode,
 } from "./docx-engine.js";
 
 const require = createRequire(import.meta.url);
@@ -60,6 +61,23 @@ function formatError(e: unknown): string {
     return `[INTERNAL_ERROR] ${e.message}`;
   }
   return `[INTERNAL_ERROR] ${String(e)}`;
+}
+
+// Server-side enforcement of F-004 (regulated-industry safety): the LLM cannot
+// silently disable tracked changes by passing track_changes=false alone.
+// Requires a second, independently named capability flag. Belt-and-braces
+// against prompt injection or long-context drift.
+function assertTrackChanges(
+  track_changes: boolean | undefined,
+  allow_untracked_edit: boolean | undefined,
+): void {
+  if (track_changes === false && allow_untracked_edit !== true) {
+    throw new EngineError(
+      ErrorCode.UNTRACKED_EDIT_NOT_ALLOWED,
+      "track_changes=false requires allow_untracked_edit=true. " +
+        "This is a safety check for regulated-industry use: silent edits to legal/regulated documents must be opted into with two independent flags.",
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,14 +226,22 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
     include_headers_footers: z
       .boolean()
       .optional()
       .default(false)
       .describe("Also replace text in headers and footers. Default false."),
   },
-  async ({ file_path, search, replace, case_sensitive, track_changes, author, include_headers_footers }) => {
+  async ({ file_path, search, replace, case_sensitive, track_changes, author, include_headers_footers, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await replaceText(
         file_path,
         search,
@@ -260,9 +286,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, paragraph_index, new_text, track_changes, author }) => {
+  async ({ file_path, paragraph_index, new_text, track_changes, author, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await editParagraph(
         file_path,
         paragraph_index,
@@ -311,9 +345,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, edits, track_changes, author }) => {
+  async ({ file_path, edits, track_changes, author, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const engineEdits = edits.map((e) => ({
         paragraphIndex: e.paragraph_index,
         newText: e.new_text,
@@ -376,9 +418,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, text, position, style, track_changes, author, num_id, num_level, copy_format_from }) => {
+  async ({ file_path, text, position, style, track_changes, author, num_id, num_level, copy_format_from, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await insertParagraph(
         file_path,
         text,
@@ -446,9 +496,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, paragraphs, track_changes, author }) => {
+  async ({ file_path, paragraphs, track_changes, author, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await insertParagraphs(
         file_path,
         paragraphs.map(p => ({
@@ -496,9 +554,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, paragraph_index, track_changes, author }) => {
+  async ({ file_path, paragraph_index, track_changes, author, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await deleteParagraph(
         file_path,
         paragraph_index,
@@ -539,9 +605,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, paragraph_indices, track_changes, author }) => {
+  async ({ file_path, paragraph_indices, track_changes, author, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await deleteParagraphs(
         file_path,
         paragraph_indices,
@@ -1304,9 +1378,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, block_index, row_index, col_index, new_text, track_changes, author }) => {
+  async ({ file_path, block_index, row_index, col_index, new_text, track_changes, author, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await editTableCell(
         file_path,
         block_index,
@@ -1357,9 +1439,17 @@ server.tool(
       .optional()
       .default("Claude")
       .describe("Author name for tracked changes"),
+    allow_untracked_edit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+      ),
   },
-  async ({ file_path, edits, track_changes, author }) => {
+  async ({ file_path, edits, track_changes, author, allow_untracked_edit }) => {
     try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
       const engineEdits = edits.map((e) => ({
         blockIndex: e.block_index,
         rowIndex: e.row_index,
