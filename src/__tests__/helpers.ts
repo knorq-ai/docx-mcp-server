@@ -57,6 +57,15 @@ export async function readRawDocXml(filePath: string): Promise<string> {
   return xml;
 }
 
+/** Read raw word/styles.xml from a .docx file */
+export async function readRawStylesXml(filePath: string): Promise<string> {
+  const data = await fs.readFile(filePath);
+  const zip = await JSZip.loadAsync(data);
+  const xml = await zip.file("word/styles.xml")?.async("string");
+  if (!xml) throw new Error("word/styles.xml not found");
+  return xml;
+}
+
 /** Read raw word/comments.xml from a .docx file (returns empty string if not present) */
 export async function readRawCommentsXml(filePath: string): Promise<string> {
   const data = await fs.readFile(filePath);

@@ -33,6 +33,7 @@ import {
   replyToComment,
   deleteComment,
   createDocument,
+  applyDocumentPreset,
   highlightText,
   insertTable,
   setHeading,
@@ -1031,10 +1032,44 @@ server.tool(
       .describe(
         "Initial text content. Use newlines to separate paragraphs.",
       ),
+    preset: z
+      .enum(["ja-business"])
+      .optional()
+      .describe(
+        "Optional style preset. 'ja-business' applies Japanese business-document defaults such as Yu Gothic body text and roomier paragraph spacing.",
+      ),
   },
-  async ({ file_path, title, content }) => {
+  async ({ file_path, title, content, preset }) => {
     try {
-      const result = await createDocument(file_path, content, title);
+      const result = await createDocument(file_path, content, title, preset);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: apply_document_preset
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "apply_document_preset",
+  "Apply a named document style preset in one pass by updating styles.xml. Use this instead of repeated paragraph-level formatting when you want a document-wide baseline.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    preset: z
+      .enum(["ja-business"])
+      .describe(
+        "Preset name. 'ja-business' applies Yu Gothic body defaults plus roomier paragraph and heading spacing.",
+      ),
+  },
+  async ({ file_path, preset }) => {
+    try {
+      const result = await applyDocumentPreset(file_path, preset);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {

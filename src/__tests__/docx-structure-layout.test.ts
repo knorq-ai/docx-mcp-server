@@ -4,6 +4,7 @@ import {
   createTmpDoc,
   cleanupTmpFiles,
   readRawDocXml,
+  readRawStylesXml,
   readRawHeaderXml,
   tmpDocxPath,
   trackTmpFile,
@@ -16,6 +17,7 @@ import {
 } from "./helpers.js";
 import {
   createDocument,
+  applyDocumentPreset,
   insertTable,
   getPageLayout,
   setPageLayout,
@@ -98,6 +100,47 @@ describe("createDocument", () => {
     expect(xml).toContain("w:sectPr");
     expect(xml).toContain("w:pgSz");
     expect(xml).toContain("w:pgMar");
+  });
+
+  it("keeps default styles generic unless a preset is requested", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await createDocument(p, "Test");
+    const stylesXml = await readRawStylesXml(p);
+    expect(stylesXml).not.toContain("Yu Gothic");
+    expect(stylesXml).not.toContain('w:eastAsia="ja-JP"');
+    expect(stylesXml).not.toContain("<w:docDefaults>");
+  });
+
+  it("supports the ja-business preset for Japanese-friendly defaults", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await createDocument(p, "本文です", "契約書", "ja-business");
+    const stylesXml = await readRawStylesXml(p);
+    expect(stylesXml).toContain("Yu Gothic");
+    expect(stylesXml).toContain('w:eastAsia="ja-JP"');
+    expect(stylesXml).toContain("<w:docDefaults>");
+    expect(stylesXml).toContain('w:after="160"');
+  });
+
+  it("applies a document preset in one styles.xml update", async () => {
+    const p = await createTmpDoc("本文です", "契約書");
+    await applyDocumentPreset(p, "ja-business");
+    const stylesXml = await readRawStylesXml(p);
+    expect(stylesXml).toContain("Yu Gothic");
+    expect(stylesXml).toContain('w:eastAsia="ja-JP"');
+    expect(stylesXml).toContain('w:styleId="Heading1"');
+  });
+
+  it("applies document presets idempotently", async () => {
+    const p = await createTmpDoc("本文です");
+    await applyDocumentPreset(p, "ja-business");
+    await applyDocumentPreset(p, "ja-business");
+    const stylesXml = await readRawStylesXml(p);
+    expect(stylesXml.match(/<w:docDefaults>/g)?.length ?? 0).toBe(1);
+    expect(stylesXml.match(/w:styleId="Heading1"/g)?.length ?? 0).toBe(1);
+    expect(stylesXml.match(/w:styleId="Heading2"/g)?.length ?? 0).toBe(1);
+    expect(stylesXml.match(/w:styleId="Heading3"/g)?.length ?? 0).toBe(1);
   });
 
   it("created document can be edited by other functions", async () => {
