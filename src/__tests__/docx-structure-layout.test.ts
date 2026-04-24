@@ -52,7 +52,7 @@ describe("createDocument", () => {
   it("creates document with title", async () => {
     const p = tmpDocxPath();
     trackTmpFile(p);
-    await createDocument(p, undefined, "My Document");
+    await createDocument(p, "My Document");
     const doc = await readDocument(p);
     expect(doc).toContain("My Document");
     expect(doc).toContain("(H1)");
@@ -61,7 +61,7 @@ describe("createDocument", () => {
   it("creates document with content", async () => {
     const p = tmpDocxPath();
     trackTmpFile(p);
-    await createDocument(p, "Line 1\nLine 2\nLine 3");
+    await createDocument(p, undefined, "Line 1\nLine 2\nLine 3");
     const doc = await readDocument(p);
     expect(doc).toContain("Line 1");
     expect(doc).toContain("Line 2");
@@ -71,7 +71,7 @@ describe("createDocument", () => {
   it("creates document with title and content", async () => {
     const p = tmpDocxPath();
     trackTmpFile(p);
-    await createDocument(p, "Body text", "Title Text");
+    await createDocument(p, "Title Text", "Body text");
     const doc = await readDocument(p);
     expect(doc).toContain("Title Text");
     expect(doc).toContain("Body text");
@@ -80,7 +80,7 @@ describe("createDocument", () => {
   it("creates parent directories if needed", async () => {
     const p = tmpDocxPath().replace(".docx", "/sub/dir/test.docx");
     trackTmpFile(p);
-    await createDocument(p, "Nested");
+    await createDocument(p, undefined, "Nested");
     const stat = await fs.stat(p);
     expect(stat.size).toBeGreaterThan(0);
     // Clean up nested dirs
@@ -93,7 +93,7 @@ describe("createDocument", () => {
   it("produced docx has proper XML structure", async () => {
     const p = tmpDocxPath();
     trackTmpFile(p);
-    await createDocument(p, "Test");
+    await createDocument(p, undefined, "Test");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:document");
     expect(xml).toContain("w:body");
@@ -105,7 +105,7 @@ describe("createDocument", () => {
   it("keeps default styles generic unless a preset is requested", async () => {
     const p = tmpDocxPath();
     trackTmpFile(p);
-    await createDocument(p, "Test");
+    await createDocument(p, undefined, "Test");
     const stylesXml = await readRawStylesXml(p);
     expect(stylesXml).not.toContain("Yu Gothic");
     expect(stylesXml).not.toContain('w:eastAsia="ja-JP"');
@@ -115,12 +115,16 @@ describe("createDocument", () => {
   it("supports the ja-business preset for Japanese-friendly defaults", async () => {
     const p = tmpDocxPath();
     trackTmpFile(p);
-    await createDocument(p, "本文です", "契約書", "ja-business");
+    await createDocument(p, "契約書", "本文です", "ja-business");
     const stylesXml = await readRawStylesXml(p);
     expect(stylesXml).toContain("Yu Gothic");
     expect(stylesXml).toContain('w:eastAsia="ja-JP"');
     expect(stylesXml).toContain("<w:docDefaults>");
     expect(stylesXml).toContain('w:after="160"');
+    // Round-trip: preset-built docx must remain readable by the engine.
+    const doc = await readDocument(p);
+    expect(doc).toContain("契約書");
+    expect(doc).toContain("本文です");
   });
 
   it("applies a document preset in one styles.xml update", async () => {

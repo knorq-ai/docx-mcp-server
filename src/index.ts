@@ -1041,7 +1041,7 @@ server.tool(
   },
   async ({ file_path, title, content, preset }) => {
     try {
-      const result = await createDocument(file_path, content, title, preset);
+      const result = await createDocument(file_path, title, content, preset);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {

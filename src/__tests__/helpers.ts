@@ -44,7 +44,7 @@ export async function createTmpDoc(
 ): Promise<string> {
   const p = tmpDocxPath();
   trackTmpFile(p);
-  await createDocument(p, content, title);
+  await createDocument(p, title, content);
   return p;
 }
 

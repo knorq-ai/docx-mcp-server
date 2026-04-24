@@ -235,7 +235,7 @@ file_path, title?, content?, preset?
 file_path, preset
 ```
 
-既存文書を日本語向けに整えたい場合は、段落ごとに `format_text` を繰り返すよりこちらを使う。
+既存文書を日本語向けに整えたい場合は、段落ごとに `format_text` を繰り返すよりこちらを使う。プリセットは `docDefaults` と `Heading 1`〜`Heading 3` を上書きする。既存の `Normal` その他のカスタムスタイルは保持される。
 
 ### レビュー
 

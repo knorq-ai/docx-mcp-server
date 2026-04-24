@@ -1874,10 +1874,10 @@ function getPresetStylesNodes(
     }
   }
 
+  const docDefaultsNode = findOne(children, "w:docDefaults");
+
   return {
-    docDefaults: findOne(children, "w:docDefaults")
-      ? cloneNode(findOne(children, "w:docDefaults"))
-      : undefined,
+    docDefaults: docDefaultsNode ? cloneNode(docDefaultsNode) : undefined,
     headingStyles,
     normalStyle,
   };
@@ -1900,8 +1900,8 @@ function upsertStyleNode(
 
 export async function createDocument(
   filePath: string,
-  content?: string,
   title?: string,
+  content?: string,
   preset?: CreateDocumentPreset,
 ): Promise<string> {
   // Validate file extension to prevent writing to arbitrary paths
@@ -2021,6 +2021,9 @@ export async function applyDocumentPreset(
       }
     }
 
+    // Preserve any existing Normal style — users often customize it. Only seed
+    // it when the document has none. Heading1–3 are part of the preset's
+    // intent, so they're upserted unconditionally.
     if (presetNodes.normalStyle) {
       const hasNormal = children.some(
         (child) => child["w:style"] !== undefined && attr(child, "w:styleId") === "Normal",

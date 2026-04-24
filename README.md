@@ -278,7 +278,7 @@ By default `create_document` keeps the generated document generic. If you want a
 file_path, preset
 ```
 
-Use this when you want to restyle an existing document without repeated `format_text` calls per paragraph.
+Use this when you want to restyle an existing document without repeated `format_text` calls per paragraph. The preset rewrites `docDefaults` and the `Heading 1`–`Heading 3` styles; an existing `Normal` style and other custom styles are preserved.
 
 ### Review
 
