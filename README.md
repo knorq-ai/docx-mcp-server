@@ -4,7 +4,7 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**32 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**33 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
@@ -13,7 +13,7 @@ A local [MCP](https://modelcontextprotocol.io/) server for reading and editing W
 | **Read** | `read_document`, `get_document_info`, `search_text`, `list_images` |
 | **Edit** | `replace_text`, `edit_paragraph`, `edit_paragraphs`, `insert_paragraph`, `insert_paragraphs`, `delete_paragraph`, `delete_paragraphs` |
 | **Format** | `format_text`, `set_paragraph_format`, `set_paragraph_formats`, `highlight_text`, `set_heading`, `set_headings` |
-| **Structure** | `insert_table`, `create_document` |
+| **Structure** | `insert_table`, `create_document`, `apply_document_preset` |
 | **Review** | `add_comment`, `add_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
@@ -266,10 +266,19 @@ file_path, items (array of {paragraph_index, level})
 file_path, position, rows, cols, data?
 ```
 
-**`create_document`** — Create a new .docx file with optional title and content.
+**`create_document`** — Create a new .docx file with optional title, content, and style preset.
 ```
-file_path, title?, content?
+file_path, title?, content?, preset?
 ```
+
+By default `create_document` keeps the generated document generic. If you want a Japanese business-document starting point, pass `preset: "ja-business"` to seed `styles.xml` with Yu Gothic body text, 11pt sizing, roomier paragraph spacing, and less cramped heading spacing.
+
+**`apply_document_preset`** — Apply a document-wide style preset in one pass by updating `styles.xml`.
+```
+file_path, preset
+```
+
+Use this when you want to restyle an existing document without repeated `format_text` calls per paragraph. The preset rewrites `docDefaults` and the `Heading 1`–`Heading 3` styles; an existing `Normal` style and other custom styles are preserved.
 
 ### Review
 
@@ -375,7 +384,7 @@ The savings are especially large for **tracked changes**, **comments**, and **ru
 
 Simple read and paragraph-format operations see smaller savings (~63–76%) since python-docx has clean APIs for these.
 
-Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 32 tools) pays for itself in 3–5 operations.
+Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 33 tools) pays for itself in 3–5 operations.
 
 ## Requirements
 

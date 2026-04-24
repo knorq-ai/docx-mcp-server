@@ -4,7 +4,7 @@
 
 ローカル [MCP](https://modelcontextprotocol.io/) サーバ。Word (.docx) ファイルの読み取り・編集を行う。Claude Code、Cursor、その他の MCP 対応クライアントで動作する。
 
-**32 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
+**33 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
 
 ## 機能一覧
 
@@ -13,7 +13,7 @@
 | **読み取り** | `read_document`, `get_document_info`, `search_text`, `list_images` |
 | **編集** | `replace_text`, `edit_paragraph`, `edit_paragraphs`, `insert_paragraph`, `insert_paragraphs`, `delete_paragraph`, `delete_paragraphs` |
 | **書式** | `format_text`, `set_paragraph_format`, `set_paragraph_formats`, `highlight_text`, `set_heading`, `set_headings` |
-| **構造** | `insert_table`, `create_document` |
+| **構造** | `insert_table`, `create_document`, `apply_document_preset` |
 | **レビュー** | `add_comment`, `add_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
 | **変更履歴** | `accept_all_changes`, `reject_all_changes` |
 | **ページレイアウト** | `get_page_layout`, `set_page_layout` |
@@ -223,10 +223,19 @@ file_path, items (array of {paragraph_index, level})
 file_path, position, rows, cols, data?
 ```
 
-**`create_document`** — 新しい .docx ファイルを作成（タイトル・本文はオプション）。
+**`create_document`** — 新しい .docx ファイルを作成（タイトル・本文・スタイルプリセットはオプション）。
 ```
-file_path, title?, content?
+file_path, title?, content?, preset?
 ```
+
+デフォルトの `create_document` は汎用的な Word スタイルを維持する。日本語のビジネス文書向けの初期設定が欲しい場合は `preset: "ja-business"` を指定すると、`styles.xml` に Yu Gothic、11pt 本文、広めの段落間隔、見出し下余白を入れた状態で生成できる。
+
+**`apply_document_preset`** — `styles.xml` を 1 回更新して文書全体にスタイルプリセットを適用。
+```
+file_path, preset
+```
+
+既存文書を日本語向けに整えたい場合は、段落ごとに `format_text` を繰り返すよりこちらを使う。プリセットは `docDefaults` と `Heading 1`〜`Heading 3` を上書きする。既存の `Normal` その他のカスタムスタイルは保持される。
 
 ### レビュー
 
@@ -332,7 +341,7 @@ AI エージェントは Raw Python (python-docx) でも DOCX を操作できる
 
 単純な読み取り・段落書式は python-docx のクリーンな API により削減幅が小さい (~63–76%)。
 
-出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。32 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
+出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。33 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
 
 ## 動作要件
 

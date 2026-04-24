@@ -44,7 +44,7 @@ export async function createTmpDoc(
 ): Promise<string> {
   const p = tmpDocxPath();
   trackTmpFile(p);
-  await createDocument(p, content, title);
+  await createDocument(p, title, content);
   return p;
 }
 
@@ -54,6 +54,15 @@ export async function readRawDocXml(filePath: string): Promise<string> {
   const zip = await JSZip.loadAsync(data);
   const xml = await zip.file("word/document.xml")?.async("string");
   if (!xml) throw new Error("word/document.xml not found");
+  return xml;
+}
+
+/** Read raw word/styles.xml from a .docx file */
+export async function readRawStylesXml(filePath: string): Promise<string> {
+  const data = await fs.readFile(filePath);
+  const zip = await JSZip.loadAsync(data);
+  const xml = await zip.file("word/styles.xml")?.async("string");
+  if (!xml) throw new Error("word/styles.xml not found");
   return xml;
 }
 

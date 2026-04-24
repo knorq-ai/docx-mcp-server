@@ -1786,10 +1786,123 @@ export async function deleteComment(
 // 13. create_document
 // ---------------------------------------------------------------------------
 
+export type CreateDocumentPreset = "ja-business";
+
+function buildStylesXml(preset?: CreateDocumentPreset): string {
+  if (preset === "ja-business") {
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults>
+<w:rPrDefault><w:rPr><w:rFonts w:ascii="Yu Gothic" w:hAnsi="Yu Gothic" w:eastAsia="Yu Gothic"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="en-US" w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault>
+<w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault>
+</w:docDefaults>
+<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="480" w:after="280" w:line="440" w:lineRule="auto"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="360" w:after="200" w:line="400" w:lineRule="auto"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="Heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="280" w:after="160" w:line="380" w:lineRule="auto"/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+</w:styles>`;
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="480" w:after="0"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="200" w:after="0"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="Heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="200" w:after="0"/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+</w:styles>`;
+}
+
+function assertCreateDocumentPreset(
+  preset?: CreateDocumentPreset,
+): void {
+  if (preset && preset !== "ja-business") {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Unsupported create_document preset: ${preset}`,
+    );
+  }
+}
+
+async function readStylesXml(handle: DocxHandle): Promise<XNode[]> {
+  const stylesXml = await handle.zip.file("word/styles.xml")?.async("string");
+  if (!stylesXml) {
+    throw new EngineError(
+      ErrorCode.INVALID_DOCX,
+      "word/styles.xml not found in DOCX",
+    );
+  }
+  return parser.parse(stylesXml);
+}
+
+function serializeStylesXml(handle: DocxHandle, parsed: XNode[]): void {
+  handle.zip.file("word/styles.xml", builder.build(parsed));
+}
+
+function getStylesRoot(parsed: XNode[]): XNode {
+  const root = parsed.find((n: XNode) => n["w:styles"]);
+  if (!root) {
+    throw new EngineError(
+      ErrorCode.INVALID_DOCX,
+      "w:styles root not found in word/styles.xml",
+    );
+  }
+  return root;
+}
+
+function getPresetStylesNodes(
+  preset: CreateDocumentPreset,
+): {
+  docDefaults?: XNode;
+  headingStyles: Map<string, XNode>;
+  normalStyle?: XNode;
+} {
+  const parsed = parser.parse(buildStylesXml(preset));
+  const root = getStylesRoot(parsed);
+  const children = root["w:styles"] as XNode[];
+
+  const headingStyles = new Map<string, XNode>();
+  let normalStyle: XNode | undefined;
+
+  for (const node of children) {
+    if (!node["w:style"]) continue;
+    const styleId = attr(node, "w:styleId");
+    if (!styleId) continue;
+    if (styleId === "Normal") {
+      normalStyle = cloneNode(node);
+    } else if (styleId === "Heading1" || styleId === "Heading2" || styleId === "Heading3") {
+      headingStyles.set(styleId, cloneNode(node));
+    }
+  }
+
+  const docDefaultsNode = findOne(children, "w:docDefaults");
+
+  return {
+    docDefaults: docDefaultsNode ? cloneNode(docDefaultsNode) : undefined,
+    headingStyles,
+    normalStyle,
+  };
+}
+
+function upsertStyleNode(
+  children: XNode[],
+  styleId: string,
+  node: XNode,
+): void {
+  const idx = children.findIndex(
+    (child) => child["w:style"] !== undefined && attr(child, "w:styleId") === styleId,
+  );
+  if (idx !== -1) {
+    children[idx] = cloneNode(node);
+  } else {
+    children.push(cloneNode(node));
+  }
+}
+
 export async function createDocument(
   filePath: string,
-  content?: string,
   title?: string,
+  content?: string,
+  preset?: CreateDocumentPreset,
 ): Promise<string> {
   // Validate file extension to prevent writing to arbitrary paths
   if (!/\.docx$/i.test(filePath)) {
@@ -1798,6 +1911,8 @@ export async function createDocument(
       `File path must end with .docx: ${filePath}`,
     );
   }
+
+  assertCreateDocumentPreset(preset);
 
   return withFileLock(filePath, async () => {
     // Check parent directory exists
@@ -1832,13 +1947,7 @@ ${bodyXml}
 </w:body>
 </w:document>`;
 
-    const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
-<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="480" w:after="0"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style>
-<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="200" w:after="0"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr></w:style>
-<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="Heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="200" w:after="0"/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
-</w:styles>`;
+    const stylesXml = buildStylesXml(preset);
 
     const numberingXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -1887,6 +1996,51 @@ ${bodyXml}
     await fs.writeFile(filePath, buf);
 
     return `Created document: ${filePath}`;
+  });
+}
+
+export async function applyDocumentPreset(
+  filePath: string,
+  preset: CreateDocumentPreset,
+): Promise<string> {
+  assertCreateDocumentPreset(preset);
+
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const stylesParsed = await readStylesXml(handle);
+    const root = getStylesRoot(stylesParsed);
+    const children = root["w:styles"] as XNode[];
+    const presetNodes = getPresetStylesNodes(preset);
+
+    const defaultsIdx = children.findIndex((child) => child["w:docDefaults"] !== undefined);
+    if (presetNodes.docDefaults) {
+      if (defaultsIdx !== -1) {
+        children[defaultsIdx] = cloneNode(presetNodes.docDefaults);
+      } else {
+        children.unshift(cloneNode(presetNodes.docDefaults));
+      }
+    }
+
+    // Preserve any existing Normal style — users often customize it. Only seed
+    // it when the document has none. Heading1–3 are part of the preset's
+    // intent, so they're upserted unconditionally.
+    if (presetNodes.normalStyle) {
+      const hasNormal = children.some(
+        (child) => child["w:style"] !== undefined && attr(child, "w:styleId") === "Normal",
+      );
+      if (!hasNormal) {
+        children.push(cloneNode(presetNodes.normalStyle));
+      }
+    }
+
+    for (const [styleId, node] of presetNodes.headingStyles.entries()) {
+      upsertStyleNode(children, styleId, node);
+    }
+
+    serializeStylesXml(handle, stylesParsed);
+    await saveDocx(handle);
+
+    return `Applied document preset "${preset}" to ${path.basename(filePath)}.`;
   });
 }
 
