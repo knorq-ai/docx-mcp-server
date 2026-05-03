@@ -114,6 +114,35 @@ import {
 // PUBLIC API
 // ===========================================================================================
 
+/**
+ * Compute the maximum revision-style w:id across every part of the DOCX
+ * (document.xml plus all header/footer/footnote/endnote XML), so newly
+ * minted w:ins/w:del IDs are guaranteed unique throughout the file.
+ *
+ * scanMaxId on the body alone misses pre-existing revision markup in
+ * header/footer parts; seeding from the body's max can collide with
+ * existing revision IDs in those parts when Word later round-trips
+ * the document. Reading the other parts as raw XML and matching
+ * `w:id="N"` is much cheaper than parsing each part.
+ */
+async function scanMaxIdAcrossParts(
+  handle: DocxHandle,
+  bodyParsed: XNode[],
+): Promise<number> {
+  let max = scanMaxId(bodyParsed);
+  for (const name of Object.keys(handle.zip.files)) {
+    if (name === "word/document.xml") continue;
+    if (!name.startsWith("word/") || !name.endsWith(".xml")) continue;
+    const xml = await handle.zip.file(name)?.async("string");
+    if (!xml) continue;
+    for (const m of xml.matchAll(/\bw:id="(\d+)"/g)) {
+      const v = parseInt(m[1], 10);
+      if (!isNaN(v) && v > max) max = v;
+    }
+  }
+  return max;
+}
+
 // ---------------------------------------------------------------------------
 // 1. read_document
 // ---------------------------------------------------------------------------
@@ -439,7 +468,7 @@ export async function replaceTexts(
 
     const counts: number[] = items.map(() => 0);
     const ctx = trackChanges
-      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
       : null;
 
     const applyToChildren = (
@@ -615,7 +644,7 @@ export async function editParagraphs(
     }
 
     const ctx = trackChanges
-      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
       : null;
 
     for (const edit of edits) {
@@ -848,7 +877,7 @@ export async function insertParagraphs(
     const body = getBody(parsed);
 
     const ctx = trackChanges
-      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
       : null;
 
     // Sort by position descending so higher-index inserts don't shift lower ones.
@@ -982,7 +1011,7 @@ export async function deleteParagraphs(
     }
 
     if (trackChanges) {
-      const maxId = scanMaxId(parsed);
+      const maxId = await scanMaxIdAcrossParts(handle, parsed);
       const ctx = newRevisionContext(maxId + 1, author);
 
       for (const idx of unique) {
@@ -2474,7 +2503,7 @@ export async function editTableCells(
     }
 
     const ctx = trackChanges
-      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
       : null;
 
     for (const { paraEl, newText } of targets) {

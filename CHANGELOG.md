@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] — Unreleased
+
+### Fixed
+- Tracked-change `w:id` allocation now scans every DOCX part (`word/document.xml` plus all `header*.xml`, `footer*.xml`, `footnotes.xml`, `endnotes.xml`) before seeding new revision IDs. Previously only the body was scanned, so existing revisions in header/footer parts could collide with newly minted revision IDs in body edits or in subsequent header/footer edits. Affects `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs`, and `edit_table_cells`.
+
 ## [3.0.0] — 2026-05-03
 
 ### Changed (BREAKING)

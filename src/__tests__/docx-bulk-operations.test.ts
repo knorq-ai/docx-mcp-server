@@ -207,6 +207,45 @@ describe("replaceTexts", () => {
     expect(doc).toContain("X hello Y Y");
   });
 
+  it("seeds revision IDs from a global scan so body edits do not collide with pre-existing HF revisions", async () => {
+    // Build a doc whose header already has w:ins with a high w:id (200).
+    // Without scanMaxIdAcrossParts, the body's new w:ins would seed from
+    // body's local max (0) + 1 = 1, and as edits accumulate, eventually
+    // collide with 200. With the fix, every new ID must be > 200.
+    const p = await createDocWithHeaderFooter("body alpha", "head", "foot");
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    // Inject pre-existing tracked insertion in the header with w:id=200.
+    const hfNames = Object.keys(zip.files).filter((n) =>
+      /^word\/(header|footer)\d*\.xml$/.test(n),
+    );
+    expect(hfNames.length).toBeGreaterThan(0);
+    const headerName = hfNames.find((n) => /header/.test(n))!;
+    const original = await zip.file(headerName)!.async("string");
+    const seeded = original.replace(
+      /<w:p>/,
+      `<w:p><w:ins w:id="200" w:author="Prior" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">existing</w:t></w:r></w:ins>`,
+    );
+    zip.file(headerName, seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    // Tracked body edit. Pre-fix, this would seed from body's local max (0)
+    // and produce w:id="1", coexisting with pre-existing id 200. That's
+    // not an immediate collision, but a second tracked op would keep
+    // counting from where we left off and eventually hit 200. The fix
+    // seeds from 200+1 so EVERY new ID is > 200.
+    await replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true);
+
+    const bodyXml = await readRawDocXml(p);
+    const bodyIds = [...bodyXml.matchAll(/w:(?:ins|del)[^>]*\bw:id="(\d+)"/g)]
+      .map((m) => parseInt(m[1], 10));
+    expect(bodyIds.length).toBeGreaterThan(0);
+    for (const id of bodyIds) {
+      expect(id).toBeGreaterThan(200);
+    }
+  });
+
   it("replaces inside headers and footers when include_headers_footers is true", async () => {
     const p = await createDocWithHeaderFooter("body alpha", "header alpha", "footer alpha");
     await replaceTexts(
