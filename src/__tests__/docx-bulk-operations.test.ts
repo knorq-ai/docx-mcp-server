@@ -10,6 +10,7 @@ import {
   readDocument,
   editParagraphs,
   insertParagraphs,
+  deleteParagraphs,
   setHeadings,
   editTableCells,
   insertTable,
@@ -205,6 +206,82 @@ describe("replaceTexts", () => {
     const doc = await readDocument(p);
     // Only "Hello" replaced (case-sensitive); both "WORLD" and "world" replaced (case-insensitive)
     expect(doc).toContain("X hello Y Y");
+  });
+
+  it("refuses tracked edit on a paragraph that already contains tracked markup (PENDING_REVISIONS)", async () => {
+    const p = await createTmpDoc("hello world");
+    // Leave tracked markup in the only paragraph.
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    // Second tracked edit hits the same paragraph (which now has w:ins) — must refuse.
+    await expect(
+      replaceTexts(p, [{ search: "world", replace: "WORLD" }], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("allows tracked edit on a paragraph with no pre-existing revisions even if other paragraphs have them", async () => {
+    const p = await createTmpDoc("alpha line\nbeta line");
+    await replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true);  // marks para 0
+    // Second edit only matches in para 1 (clean) — should succeed.
+    const res = await replaceTexts(p, [{ search: "beta", replace: "BETA" }], true);
+    expect(res).toContain("Replaced 1");
+  });
+
+  it("untracked mode bypasses the pending-revisions guard", async () => {
+    const p = await createTmpDoc("hello world");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    // Untracked mode: free to edit even where revisions exist.
+    const res = await replaceTexts(p, [{ search: "world", replace: "WORLD" }], false);
+    expect(res).toContain("Replaced 1");
+  });
+
+  it("editParagraphs refuses to edit a paragraph that already contains tracked markup", async () => {
+    const p = await createTmpDoc("hello world\nuntouched");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);  // para 0 has w:ins now
+    await expect(
+      editParagraphs(p, [{ paragraphIndex: 0, newText: "anything" }], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("editParagraphs allows editing a clean paragraph even if a sibling has revisions", async () => {
+    const p = await createTmpDoc("hello world\nuntouched");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);  // para 0 has w:ins
+    // Editing para 1 (clean) is fine.
+    await editParagraphs(p, [{ paragraphIndex: 1, newText: "edited" }], true);
+    const doc = await readDocument(p);
+    expect(doc).toContain("edited");
+  });
+
+  it("deleteParagraphs refuses to delete a paragraph with pending revisions in tracked mode", async () => {
+    const p = await createTmpDoc("hello world\nkeep");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    await expect(
+      deleteParagraphs(p, [0], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("deleteParagraphs (untracked) is allowed to hard-delete a paragraph with revisions", async () => {
+    const p = await createTmpDoc("hello world\nkeep");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    // Untracked = hard splice, no nested-markup risk.
+    await deleteParagraphs(p, [0], false);
+    const doc = await readDocument(p);
+    expect(doc).toContain("keep");
+    expect(doc).not.toContain("HELLO");
+  });
+
+  it("editTableCells refuses to edit a cell with pending revisions", async () => {
+    const p = await createTmpDoc("Before");
+    await insertTable(p, -1, 1, 1, [["target text"]]);
+    // Make a tracked edit inside the cell.
+    await replaceTexts(p, [{ search: "target", replace: "TARGET" }], true);
+    // Now the cell paragraph has w:ins. Re-editing it must refuse.
+    await expect(
+      editTableCells(
+        p,
+        [{ blockIndex: 1, rowIndex: 0, colIndex: 0, newText: "anything" }],
+        true,
+      ),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
   });
 
   it("seeds revision IDs from a global scan so body edits do not collide with pre-existing HF revisions", async () => {

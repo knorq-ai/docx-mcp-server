@@ -58,6 +58,7 @@ import {
   enumerateBlocks,
   replaceInParagraph,
   replaceInParagraphTracked,
+  paragraphHasRevisions,
   scanMaxId,
   newRevisionContext,
   allocRevId,
@@ -113,6 +114,62 @@ import {
 // ===========================================================================================
 // PUBLIC API
 // ===========================================================================================
+
+/**
+ * Throw `PENDING_REVISIONS` with a consistent message pointing the caller
+ * at `accept_all_changes` / `reject_all_changes`. Used by tracked-mode
+ * editing operations that refuse to operate on paragraphs already
+ * containing tracked-change markup, because the existing matcher treats
+ * runs inside an existing w:ins as if they were normal text and produces
+ * nested w:ins/w:del that does not round-trip through accept/reject.
+ */
+function throwPendingRevisions(where: string): never {
+  throw new EngineError(
+    ErrorCode.PENDING_REVISIONS,
+    `${where} contains pre-existing tracked changes (w:ins/w:del). ` +
+      `Tracked editing operations cannot safely modify content that already ` +
+      `has revision markup — the resulting nested markup would not round-trip ` +
+      `through accept_all_changes / reject_all_changes. ` +
+      `Resolve existing revisions first via accept_all_changes or ` +
+      `reject_all_changes, or set track_changes: false (with allow_untracked_edit: true) ` +
+      `to apply the edit without generating new revision markup.`,
+  );
+}
+
+/**
+ * Walk the body and report the first paragraph that has pending revisions
+ * AND would be affected by the operation. The `predicate` decides which
+ * paragraphs are considered "affected" — for replaceTexts that's any
+ * paragraph containing a match for any item; for editParagraphs/deleteParagraphs/etc.
+ * that's only the paragraphs at the targeted indices. Returns null if
+ * no conflicting paragraph is found.
+ */
+function findRevisionConflict(
+  body: XNode[],
+  isAffected: (pChildren: XNode[]) => boolean,
+): { kind: "body" | "table"; description: string } | null {
+  for (let i = 0; i < body.length; i++) {
+    const child = body[i];
+    if (child["w:p"]) {
+      const pChildren = child["w:p"] as XNode[];
+      if (isAffected(pChildren) && paragraphHasRevisions(pChildren)) {
+        return { kind: "body", description: `Body paragraph at body-index ${i}` };
+      }
+    } else if (child["w:tbl"]) {
+      let conflict: { row: number; col: number } | null = null;
+      forEachParagraphInTable(child["w:tbl"], (pChildren) => {
+        if (conflict) return;
+        if (isAffected(pChildren) && paragraphHasRevisions(pChildren)) {
+          conflict = { row: -1, col: -1 };
+        }
+      });
+      if (conflict) {
+        return { kind: "table", description: `A cell in the table at body-index ${i}` };
+      }
+    }
+  }
+  return null;
+}
 
 /**
  * Compute the maximum revision-style w:id across every part of the DOCX
@@ -466,6 +523,20 @@ export async function replaceTexts(
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
 
+    if (trackChanges) {
+      const conflict = findRevisionConflict(body, (pChildren) => {
+        if (!paragraphHasRevisions(pChildren)) return false;
+        const text = extractParagraphText(pChildren);
+        return items.some((it) => {
+          const cs = it.caseSensitive ?? false;
+          const haystack = cs ? text : text.toLowerCase();
+          const needle = cs ? it.search : it.search.toLowerCase();
+          return haystack.includes(needle);
+        });
+      });
+      if (conflict) throwPendingRevisions(conflict.description);
+    }
+
     const counts: number[] = items.map(() => 0);
     const ctx = trackChanges
       ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
@@ -640,6 +711,9 @@ export async function editParagraphs(
       const element = body[bodyIdxs[edit.paragraphIndex]];
       if (!element["w:p"]) {
         throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${edit.paragraphIndex} is not a paragraph (it may be a table).`);
+      }
+      if (trackChanges && paragraphHasRevisions(element["w:p"] as XNode[])) {
+        throwPendingRevisions(`Paragraph at index ${edit.paragraphIndex}`);
       }
     }
 
@@ -1011,6 +1085,22 @@ export async function deleteParagraphs(
     }
 
     if (trackChanges) {
+      // Reject if any targeted paragraph already has tracked-change markup.
+      // Tables are checked cell-by-cell. Paragraph-mark deletion via
+      // pPr > rPr > w:del also counts.
+      for (const idx of unique) {
+        const element = body[bodyIdxs[idx]];
+        if (element["w:p"] && paragraphHasRevisions(element["w:p"] as XNode[])) {
+          throwPendingRevisions(`Block at index ${idx}`);
+        } else if (element["w:tbl"]) {
+          let conflict = false;
+          forEachParagraphInTable(element["w:tbl"], (pChildren) => {
+            if (paragraphHasRevisions(pChildren)) conflict = true;
+          });
+          if (conflict) throwPendingRevisions(`Table at index ${idx}`);
+        }
+      }
+
       const maxId = await scanMaxIdAcrossParts(handle, parsed);
       const ctx = newRevisionContext(maxId + 1, author);
 
@@ -2496,10 +2586,18 @@ export async function editTableCells(
     const bodyIdxs = blockBodyIndices(body);
 
     // Validate all cells upfront and collect paragraph references
-    const targets: { paraEl: XNode; newText: string }[] = [];
+    const targets: { paraEl: XNode; newText: string; edit: EditTableCellItem }[] = [];
     for (const edit of edits) {
       const paraEl = getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
-      targets.push({ paraEl, newText: edit.newText });
+      targets.push({ paraEl, newText: edit.newText, edit });
+    }
+
+    if (trackChanges) {
+      for (const { paraEl, edit } of targets) {
+        if (paragraphHasRevisions(paraEl["w:p"] as XNode[])) {
+          throwPendingRevisions(`Table cell at block ${edit.blockIndex} row ${edit.rowIndex} col ${edit.colIndex}`);
+        }
+      }
     }
 
     const ctx = trackChanges

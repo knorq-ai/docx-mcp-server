@@ -134,6 +134,35 @@ export function extractTableText(
 // Style / heading detection
 // ---------------------------------------------------------------------------
 
+/**
+ * Detect whether a paragraph already contains tracked-change markup
+ * (run-level w:ins/w:del or paragraph-mark w:ins/w:del under pPr > rPr).
+ *
+ * Tracked editing operations (replace, edit, delete) currently treat the
+ * runs inside an existing w:ins as if they were normal text — they
+ * happily generate new w:del/w:ins markers around or inside that
+ * insertion, producing nested or overlapping revision markup that does
+ * not round-trip cleanly through accept/reject. The safe response is to
+ * refuse the operation and force the caller to accept_all_changes or
+ * reject_all_changes first.
+ */
+export function paragraphHasRevisions(pChildren: XNode[]): boolean {
+  for (const child of pChildren) {
+    if (child["w:ins"] !== undefined) return true;
+    if (child["w:del"] !== undefined) return true;
+  }
+  const pPr = findOne(pChildren, "w:pPr");
+  if (pPr) {
+    const rPr = findOne(pPr["w:pPr"] as XNode[], "w:rPr");
+    if (rPr) {
+      for (const child of rPr["w:rPr"] as XNode[]) {
+        if (child["w:ins"] !== undefined || child["w:del"] !== undefined) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function getParagraphStyle(pChildren: XNode[]): string | undefined {
   const pPr = findOne(pChildren, "w:pPr");
   if (!pPr) return undefined;
