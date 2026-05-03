@@ -8,10 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [3.1.0] — 2026-05-03
 
 ### Added
-- New `PENDING_REVISIONS` error code. Tracked-mode editing tools (`replace_texts`, `edit_paragraphs`, `delete_paragraphs`, `edit_table_cells`) now refuse to operate on a paragraph or table cell that already contains tracked-change markup (`w:ins`/`w:del`). Previously the underlying matcher walked into existing `w:ins` runs as if they were normal text, producing nested or overlapping revision markup that did not round-trip through `accept_all_changes` / `reject_all_changes`. Resolution: call `accept_all_changes` or `reject_all_changes` first, or pass `track_changes: false` (with `allow_untracked_edit: true`).
+- New `PENDING_REVISIONS` error code. Tracked-mode editing tools (`replace_texts`, `edit_paragraphs`, `delete_paragraphs`, `edit_table_cells`) now refuse to operate on a paragraph or table cell that already contains tracked-change markup. The guard detects:
+  - run-level `w:ins` / `w:del`
+  - move-tracking `w:moveFrom` / `w:moveTo`
+  - paragraph-mark revisions under `pPr > rPr`
+  - revisions nested inside inline `w:sdt > w:sdtContent` (Google Docs export pattern)
+  - existing revisions in header/footer paragraphs when `include_headers_footers: true`
+  Previously the matcher walked into existing tracked wrappers as if they were normal text, producing nested or overlapping revision markup that did not round-trip through `accept_all_changes` / `reject_all_changes`. Resolution: call `accept_all_changes` or `reject_all_changes` first, or pass `track_changes: false` (with `allow_untracked_edit: true`).
 
 ### Fixed
-- Tracked-change `w:id` allocation now scans every DOCX part (`word/document.xml` plus all `header*.xml`, `footer*.xml`, `footnotes.xml`, `endnotes.xml`) before seeding new revision IDs. Previously only the body was scanned, so existing revisions in header/footer parts could collide with newly minted revision IDs in body edits or in subsequent header/footer edits. Affects `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs`, and `edit_table_cells`.
+- Tracked-change `w:id` allocation now scans every DOCX part (`word/document.xml` plus all `header*.xml`, `footer*.xml`, `footnotes.xml`, `endnotes.xml`) before seeding new revision IDs. The scan accepts both single-quoted and double-quoted attribute values and tolerates whitespace around `=`. Previously only the body was scanned with a strict double-quoted regex, so existing revisions in header/footer parts (or any external tool that emits single-quoted XML) could collide with newly minted revision IDs. Affects `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs`, and `edit_table_cells`.
 
 ## [3.0.0] — 2026-05-03
 

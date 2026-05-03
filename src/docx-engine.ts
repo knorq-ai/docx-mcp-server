@@ -192,7 +192,8 @@ async function scanMaxIdAcrossParts(
     if (!name.startsWith("word/") || !name.endsWith(".xml")) continue;
     const xml = await handle.zip.file(name)?.async("string");
     if (!xml) continue;
-    for (const m of xml.matchAll(/\bw:id="(\d+)"/g)) {
+    // XML allows single OR double quotes and whitespace around '='. Match both.
+    for (const m of xml.matchAll(/\bw:id\s*=\s*["'](\d+)["']/g)) {
       const v = parseInt(m[1], 10);
       if (!isNaN(v) && v > max) max = v;
     }
@@ -523,18 +524,45 @@ export async function replaceTexts(
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
 
+    // Predicate: does any item match this paragraph's text?
+    const itemsMatchParagraph = (pChildren: XNode[]): boolean => {
+      const text = extractParagraphText(pChildren);
+      return items.some((it) => {
+        const cs = it.caseSensitive ?? false;
+        const haystack = cs ? text : text.toLowerCase();
+        const needle = cs ? it.search : it.search.toLowerCase();
+        return haystack.includes(needle);
+      });
+    };
+
+    // Parse header/footer files upfront so the pending-revisions guard
+    // and the later write step share one parse pass per file.
+    interface HfPart { name: string; parsed: XNode[]; children: XNode[]; }
+    const hfParts: HfPart[] = [];
+    if (includeHeadersFooters) {
+      for (const hfFile of getHeaderFooterFiles(handle)) {
+        const hfXml = await handle.zip.file(hfFile)?.async("string");
+        if (!hfXml) continue;
+        const hfParsed: XNode[] = parser.parse(hfXml);
+        const rootEl = hfParsed.find((n: XNode) => n["w:hdr"] || n["w:ftr"]);
+        if (!rootEl) continue;
+        const hfChildren = rootEl["w:hdr"] ?? rootEl["w:ftr"];
+        hfParts.push({ name: hfFile, parsed: hfParsed, children: hfChildren });
+      }
+    }
+
     if (trackChanges) {
       const conflict = findRevisionConflict(body, (pChildren) => {
-        if (!paragraphHasRevisions(pChildren)) return false;
-        const text = extractParagraphText(pChildren);
-        return items.some((it) => {
-          const cs = it.caseSensitive ?? false;
-          const haystack = cs ? text : text.toLowerCase();
-          const needle = cs ? it.search : it.search.toLowerCase();
-          return haystack.includes(needle);
-        });
+        return paragraphHasRevisions(pChildren) && itemsMatchParagraph(pChildren);
       });
       if (conflict) throwPendingRevisions(conflict.description);
+      // Same check for header/footer paragraphs.
+      for (const hf of hfParts) {
+        const hfConflict = findRevisionConflict(hf.children, (pChildren) => {
+          return paragraphHasRevisions(pChildren) && itemsMatchParagraph(pChildren);
+        });
+        if (hfConflict) throwPendingRevisions(`A paragraph in ${hf.name}`);
+      }
     }
 
     const counts: number[] = items.map(() => 0);
@@ -568,21 +596,12 @@ export async function replaceTexts(
     applyToChildren(body, ctx);
 
     if (includeHeadersFooters) {
-      const hfFiles = getHeaderFooterFiles(handle);
       let hfMaxId = ctx ? ctx.nextId - 1 : 0;
-
-      for (const hfFile of hfFiles) {
-        const hfXml = await handle.zip.file(hfFile)?.async("string");
-        if (!hfXml) continue;
-        const hfParsed: XNode[] = parser.parse(hfXml);
-        const rootEl = hfParsed.find((n: XNode) => n["w:hdr"] || n["w:ftr"]);
-        if (!rootEl) continue;
-        const hfChildren = rootEl["w:hdr"] ?? rootEl["w:ftr"];
-
+      for (const hf of hfParts) {
         const ctx2 = trackChanges ? newRevisionContext(hfMaxId + 1, author) : null;
-        applyToChildren(hfChildren, ctx2);
+        applyToChildren(hf.children, ctx2);
         if (ctx2) hfMaxId = ctx2.nextId - 1;
-        handle.zip.file(hfFile, builder.build(hfParsed));
+        handle.zip.file(hf.name, builder.build(hf.parsed));
       }
     }
 

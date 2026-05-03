@@ -269,6 +269,80 @@ describe("replaceTexts", () => {
     expect(doc).not.toContain("HELLO");
   });
 
+  it("refuses tracked edit when a header paragraph has pending revisions and include_headers_footers is true", async () => {
+    const p = await createDocWithHeaderFooter("body alpha", "header alpha", "footer text");
+    // Inject pre-existing tracked insertion in the header.
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    const hfNames = Object.keys(zip.files).filter((n) => /^word\/header\d*\.xml$/.test(n));
+    const headerName = hfNames[0];
+    const headerXml = await zip.file(headerName)!.async("string");
+    const seeded = headerXml.replace(
+      /<w:p>/,
+      `<w:p><w:ins w:id="500" w:author="Prior" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">alpha</w:t></w:r></w:ins>`,
+    );
+    zip.file(headerName, seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    // Tracked replace_texts that matches "alpha" in both body and header.
+    // With include_headers_footers=true the header has pending revisions
+    // on a matching paragraph — must refuse.
+    await expect(
+      replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true, "Claude", true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("paragraphHasRevisions detects pre-existing w:moveTo tracking", async () => {
+    const p = await createTmpDoc("hello there");
+    // Inject a w:moveTo as a sibling of the existing run so the guard
+    // sees a revision marker in the paragraph while the matcher still
+    // finds "hello" in the normal run. Tracked replace_texts must refuse.
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    const docXml = await zip.file("word/document.xml")!.async("string");
+    const seeded = docXml.replace(
+      "</w:p>",
+      `<w:moveTo w:id="700" w:author="Mover" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">moved</w:t></w:r></w:moveTo></w:p>`,
+    );
+    zip.file("word/document.xml", seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    await expect(
+      replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("scanMaxIdAcrossParts handles single-quoted w:id attributes", async () => {
+    // Some external tools emit single-quoted XML attributes. Verify the
+    // regex picks them up so newly minted IDs still strictly increase.
+    const p = await createDocWithHeaderFooter("body alpha", "head", "foot");
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    const headerName = Object.keys(zip.files).find((n) =>
+      /^word\/header\d*\.xml$/.test(n),
+    )!;
+    const xml = await zip.file(headerName)!.async("string");
+    // Pre-seed the header with a single-quoted high w:id.
+    const seeded = xml.replace(
+      /<w:p>/,
+      `<w:p><w:ins w:id='900' w:author='Prior' w:date='2024-01-01T00:00:00Z'><w:r><w:t xml:space='preserve'>existing</w:t></w:r></w:ins>`,
+    );
+    zip.file(headerName, seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    await replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true);
+    const bodyXml = await readRawDocXml(p);
+    const bodyIds = [...bodyXml.matchAll(/w:(?:ins|del)[^>]*\bw:id\s*=\s*["'](\d+)["']/g)]
+      .map((m) => parseInt(m[1], 10));
+    expect(bodyIds.length).toBeGreaterThan(0);
+    for (const id of bodyIds) {
+      expect(id).toBeGreaterThan(900);
+    }
+  });
+
   it("editTableCells refuses to edit a cell with pending revisions", async () => {
     const p = await createTmpDoc("Before");
     await insertTable(p, -1, 1, 1, [["target text"]]);
