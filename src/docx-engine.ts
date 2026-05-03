@@ -345,119 +345,162 @@ export async function searchTextStructured(
 }
 
 // ---------------------------------------------------------------------------
-// 4. replace_text
+// 4. replace_texts (bulk find/replace)
 // ---------------------------------------------------------------------------
 
-export async function replaceText(
+export interface ReplaceTextItem {
+  search: string;
+  replace: string;
+  caseSensitive?: boolean;
+}
+
+/**
+ * Detect whether two non-empty strings share any positional overlap that
+ * could cause one to land on or across the other in a document. Used by
+ * the tracked-mode overlap guard in `replaceTexts`. Returns true if:
+ *   - either string fully contains the other, OR
+ *   - a non-empty prefix of `needle` equals a suffix of `haystack`, OR
+ *   - a non-empty suffix of `needle` equals a prefix of `haystack`.
+ * Caller must ensure both inputs are non-empty.
+ */
+function textsOverlap(needle: string, haystack: string): boolean {
+  if (haystack.includes(needle)) return true;
+  if (needle.includes(haystack)) return true;
+  const maxLen = Math.min(needle.length, haystack.length) - 1;
+  for (let len = 1; len <= maxLen; len++) {
+    if (haystack.endsWith(needle.slice(0, len))) return true;
+    if (haystack.startsWith(needle.slice(needle.length - len))) return true;
+  }
+  return false;
+}
+
+/**
+ * Apply multiple find/replace operations in a single open/parse/save cycle.
+ *
+ * Items are applied sequentially in array order. With trackChanges=true a
+ * single revision context is shared across all items so revision IDs stay
+ * monotonic.
+ */
+export async function replaceTexts(
   filePath: string,
-  search: string,
-  replace: string,
-  caseSensitive: boolean = false,
+  items: ReplaceTextItem[],
   trackChanges: boolean = true,
   author: string = "Claude",
   includeHeadersFooters: boolean = false,
 ): Promise<string> {
+  if (items.length === 0) {
+    return `No replacements to apply.`;
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].search.length === 0) {
+      throw new EngineError(
+        ErrorCode.INVALID_PARAMETER,
+        `items[${i}].search is empty; replacement would not terminate.`,
+      );
+    }
+  }
+
+  // Conservative tracked-mode overlap guard: if item N's search and an
+  // earlier item M's replace share any non-empty substring (full
+  // containment OR boundary overlap), item N's matcher could land on or
+  // across M's w:ins, producing nested w:ins/w:del markup that does not
+  // round-trip through rejectAllChanges. Untracked mode is unaffected
+  // because replacements happen in plain text. This is a static check
+  // on the items themselves, not the document — it errs on the side of
+  // refusing risky combinations even when the document content might
+  // not actually trigger the failure.
+  if (trackChanges) {
+    for (let i = 1; i < items.length; i++) {
+      const cs = items[i].caseSensitive ?? false;
+      const needle = cs ? items[i].search : items[i].search.toLowerCase();
+      for (let j = 0; j < i; j++) {
+        // Skip items with empty replace (delete operations) — they produce
+        // no inserted text, so a later search cannot land on them.
+        if (items[j].replace.length === 0) continue;
+        const earlierReplace = cs ? items[j].replace : items[j].replace.toLowerCase();
+        if (textsOverlap(needle, earlierReplace)) {
+          throw new EngineError(
+            ErrorCode.INVALID_PARAMETER,
+            `items[${i}].search ("${items[i].search}") could match text produced by items[${j}].replace ("${items[j].replace}"). ` +
+              `replace_texts conservatively refuses this under track_changes=true even when item ${j} produces no matches in practice, ` +
+              `because tracked sequential replacement cannot safely chain overlapping items: nested w:ins/w:del does not round-trip through rejectAllChanges. ` +
+              `Issue separate replace_texts calls (one per item) instead, or set track_changes: false.`,
+          );
+        }
+      }
+    }
+  }
+
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
 
-    let totalReplacements = 0;
-    const maxId = trackChanges ? scanMaxId(parsed) : 0;
-    const ctx = trackChanges ? newRevisionContext(maxId + 1, author) : null;
+    const counts: number[] = items.map(() => 0);
+    const ctx = trackChanges
+      ? newRevisionContext(scanMaxId(parsed) + 1, author)
+      : null;
 
-    if (ctx) {
-      for (const child of body) {
-        if (child["w:p"]) {
-          totalReplacements += replaceInParagraphTracked(
-            child["w:p"],
-            search,
-            replace,
-            caseSensitive,
-            ctx,
-          );
-        } else if (child["w:tbl"]) {
-          forEachParagraphInTable(child["w:tbl"], (pChildren) => {
-            totalReplacements += replaceInParagraphTracked(pChildren, search, replace, caseSensitive, ctx);
-          });
+    const applyToChildren = (
+      children: XNode[],
+      revCtx: RevisionContext | null,
+    ): void => {
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const cs = it.caseSensitive ?? false;
+        for (const child of children) {
+          if (child["w:p"]) {
+            counts[i] += revCtx
+              ? replaceInParagraphTracked(child["w:p"], it.search, it.replace, cs, revCtx)
+              : replaceInParagraph(child["w:p"], it.search, it.replace, cs);
+          } else if (child["w:tbl"]) {
+            forEachParagraphInTable(child["w:tbl"], (pChildren) => {
+              counts[i] += revCtx
+                ? replaceInParagraphTracked(pChildren, it.search, it.replace, cs, revCtx)
+                : replaceInParagraph(pChildren, it.search, it.replace, cs);
+            });
+          }
         }
       }
-    } else {
-      for (const child of body) {
-        if (child["w:p"]) {
-          totalReplacements += replaceInParagraph(
-            child["w:p"],
-            search,
-            replace,
-            caseSensitive,
-          );
-        } else if (child["w:tbl"]) {
-          forEachParagraphInTable(child["w:tbl"], (pChildren) => {
-            totalReplacements += replaceInParagraph(pChildren, search, replace, caseSensitive);
-          });
-        }
-      }
-    }
+    };
 
-    // Optionally scan headers and footers
+    applyToChildren(body, ctx);
+
     if (includeHeadersFooters) {
       const hfFiles = getHeaderFooterFiles(handle);
-      // Use the running revision counter from body replacements to avoid ID overlap
       let hfMaxId = ctx ? ctx.nextId - 1 : 0;
 
       for (const hfFile of hfFiles) {
         const hfXml = await handle.zip.file(hfFile)?.async("string");
         if (!hfXml) continue;
         const hfParsed: XNode[] = parser.parse(hfXml);
-        // Headers use w:hdr, footers use w:ftr
         const rootEl = hfParsed.find((n: XNode) => n["w:hdr"] || n["w:ftr"]);
         if (!rootEl) continue;
         const hfChildren = rootEl["w:hdr"] ?? rootEl["w:ftr"];
 
-        if (trackChanges) {
-          const ctx2 = newRevisionContext(hfMaxId + 1, author);
-          for (const child of hfChildren) {
-            if (child["w:p"]) {
-              totalReplacements += replaceInParagraphTracked(child["w:p"], search, replace, caseSensitive, ctx2);
-            } else if (child["w:tbl"]) {
-              forEachParagraphInTable(child["w:tbl"], (pChildren) => {
-                totalReplacements += replaceInParagraphTracked(pChildren, search, replace, caseSensitive, ctx2);
-              });
-            }
-          }
-          // Advance running ID so the next file doesn't overlap
-          hfMaxId = ctx2.nextId - 1;
-          handle.zip.file(hfFile, builder.build(hfParsed));
-        } else {
-          for (const child of hfChildren) {
-            if (child["w:p"]) {
-              totalReplacements += replaceInParagraph(child["w:p"], search, replace, caseSensitive);
-            } else if (child["w:tbl"]) {
-              forEachParagraphInTable(child["w:tbl"], (pChildren) => {
-                totalReplacements += replaceInParagraph(pChildren, search, replace, caseSensitive);
-              });
-            }
-          }
-          handle.zip.file(hfFile, builder.build(hfParsed));
-        }
+        const ctx2 = trackChanges ? newRevisionContext(hfMaxId + 1, author) : null;
+        applyToChildren(hfChildren, ctx2);
+        if (ctx2) hfMaxId = ctx2.nextId - 1;
+        handle.zip.file(hfFile, builder.build(hfParsed));
       }
     }
 
-    if (totalReplacements === 0) {
-      return `No occurrences of "${search}" found in ${path.basename(filePath)}.`;
+    const total = counts.reduce((s, n) => s + n, 0);
+    if (total === 0) {
+      return `No occurrences found for any of the ${items.length} search term(s) in ${path.basename(filePath)}.`;
     }
 
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
 
     const mode = trackChanges ? " (tracked)" : "";
-    return `Replaced ${totalReplacements} occurrence(s) of "${search}" with "${replace}" in ${path.basename(filePath)}${mode}.`;
+    const breakdown = items
+      .map((it, i) => `  ${i + 1}. "${it.search}" → "${it.replace}": ${counts[i]}`)
+      .join("\n");
+    return `Replaced ${total} occurrence(s) across ${items.length} item(s) in ${path.basename(filePath)}${mode}.\n${breakdown}`;
   });
 }
-
-// ---------------------------------------------------------------------------
-// 5. edit_paragraph
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Shared helper: replace paragraph text content in-place
@@ -535,45 +578,8 @@ function replaceParagraphText(
   }
 }
 
-export async function editParagraph(
-  filePath: string,
-  paragraphIndex: number,
-  newText: string,
-  trackChanges: boolean = true,
-  author: string = "Claude",
-): Promise<string> {
-  return withFileLock(filePath, async () => {
-    const handle = await openDocx(filePath);
-    const parsed = await parseDocXml(handle);
-    const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
-
-    if (paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
-      throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
-    }
-
-    const element = body[bodyIdxs[paragraphIndex]];
-
-    if (!element["w:p"]) {
-      throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${paragraphIndex} is not a paragraph (it may be a table).`);
-    }
-
-    const ctx = trackChanges
-      ? newRevisionContext(scanMaxId(parsed) + 1, author)
-      : null;
-
-    replaceParagraphText(element, newText, ctx);
-
-    serializeDocXml(handle, parsed);
-    await saveDocx(handle);
-
-    const mode = trackChanges ? " (tracked)" : "";
-    return `Updated paragraph ${paragraphIndex} in ${path.basename(filePath)}${mode}.`;
-  });
-}
-
 // ---------------------------------------------------------------------------
-// 5b. edit_paragraphs (bulk)
+// 5. edit_paragraphs
 // ---------------------------------------------------------------------------
 
 export interface EditParagraphItem {
@@ -623,10 +629,6 @@ export async function editParagraphs(
     return `Updated ${edits.length} paragraph(s) in ${path.basename(filePath)}${mode}.`;
   });
 }
-
-// ---------------------------------------------------------------------------
-// 6. insert_paragraph
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Shared helper: build a new paragraph element
@@ -782,41 +784,8 @@ function spliceNewParagraph(
   }
 }
 
-export async function insertParagraph(
-  filePath: string,
-  text: string,
-  position: number,
-  style?: string,
-  trackChanges: boolean = true,
-  author: string = "Claude",
-  numId?: number,
-  numLevel?: number,
-  copyFormatFrom?: number,
-): Promise<string> {
-  return withFileLock(filePath, async () => {
-    const handle = await openDocx(filePath);
-    const parsed = await parseDocXml(handle);
-    const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
-
-    const ctx = trackChanges
-      ? newRevisionContext(scanMaxId(parsed) + 1, author)
-      : null;
-
-    const opts = resolveInsertOpts(body, bodyIdxs, numId, numLevel, copyFormatFrom);
-    const newPara = buildNewParagraph(text, style, ctx, opts);
-    spliceNewParagraph(body, bodyIdxs, position, newPara);
-
-    serializeDocXml(handle, parsed);
-    await saveDocx(handle);
-
-    const mode = trackChanges ? " (tracked)" : "";
-    return `Inserted paragraph at position ${position} in ${path.basename(filePath)}${mode}.`;
-  });
-}
-
 // ---------------------------------------------------------------------------
-// 6b. insert_paragraphs (bulk)
+// 6. insert_paragraphs
 // ---------------------------------------------------------------------------
 
 /** Resolve BuildParagraphOptions from user-facing parameters. */
@@ -987,45 +956,7 @@ function markBlockAsDeleted(element: XNode, ctx: RevisionContext): void {
 }
 
 // ---------------------------------------------------------------------------
-// 7. delete_paragraph
-// ---------------------------------------------------------------------------
-
-export async function deleteParagraph(
-  filePath: string,
-  paragraphIndex: number,
-  trackChanges: boolean = true,
-  author: string = "Claude",
-): Promise<string> {
-  return withFileLock(filePath, async () => {
-    const handle = await openDocx(filePath);
-    const parsed = await parseDocXml(handle);
-    const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
-
-    if (paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
-      throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
-    }
-
-    const bodyIdx = bodyIdxs[paragraphIndex];
-
-    if (trackChanges) {
-      const maxId = scanMaxId(parsed);
-      const ctx = newRevisionContext(maxId + 1, author);
-      markBlockAsDeleted(body[bodyIdx], ctx);
-    } else {
-      body.splice(bodyIdx, 1);
-    }
-
-    serializeDocXml(handle, parsed);
-    await saveDocx(handle);
-
-    const mode = trackChanges ? " (tracked)" : "";
-    return `Deleted block ${paragraphIndex} from ${path.basename(filePath)}${mode}.`;
-  });
-}
-
-// ---------------------------------------------------------------------------
-// 7b. delete_paragraphs (bulk)
+// 7. delete_paragraphs
 // ---------------------------------------------------------------------------
 
 export async function deleteParagraphs(
@@ -1121,46 +1052,7 @@ export async function formatText(
 }
 
 // ---------------------------------------------------------------------------
-// 9. set_paragraph_format
-// ---------------------------------------------------------------------------
-
-export async function setParagraphFormat(
-  filePath: string,
-  paragraphIndex: number,
-  format: ParagraphFormat,
-): Promise<string> {
-  return withFileLock(filePath, async () => {
-    const handle = await openDocx(filePath);
-    const parsed = await parseDocXml(handle);
-    const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
-
-    if (paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
-      throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
-    }
-
-    const bodyIdx = bodyIdxs[paragraphIndex];
-    const element = body[bodyIdx];
-
-    if (!element["w:p"]) {
-      throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${paragraphIndex} is not a paragraph.`);
-    }
-
-    applyParagraphFormat(element["w:p"], format);
-
-    serializeDocXml(handle, parsed);
-    await saveDocx(handle);
-
-    const fmtDesc = Object.entries(format)
-      .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(", ");
-    return `Applied paragraph formatting (${fmtDesc}) to block ${paragraphIndex} in ${path.basename(filePath)}.`;
-  });
-}
-
-// ---------------------------------------------------------------------------
-// 9b. set_paragraph_formats
+// 9. set_paragraph_formats
 // ---------------------------------------------------------------------------
 
 export async function setParagraphFormats(
@@ -2134,10 +2026,6 @@ export async function insertTable(
 }
 
 // ---------------------------------------------------------------------------
-// 16. set_heading
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Shared helper: apply heading level to a paragraph element
 // ---------------------------------------------------------------------------
 
@@ -2168,42 +2056,8 @@ function applyHeadingLevel(pChildren: XNode[], level: number): void {
   }
 }
 
-export async function setHeading(
-  filePath: string,
-  paragraphIndex: number,
-  level: number,
-): Promise<string> {
-  if (level < 1 || level > 9) {
-    throw new EngineError(ErrorCode.INVALID_PARAMETER, `Heading level must be between 1 and 9. Got: ${level}.`);
-  }
-
-  return withFileLock(filePath, async () => {
-    const handle = await openDocx(filePath);
-    const parsed = await parseDocXml(handle);
-    const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
-
-    if (paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
-      throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
-    }
-
-    const element = body[bodyIdxs[paragraphIndex]];
-
-    if (!element["w:p"]) {
-      throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${paragraphIndex} is not a paragraph.`);
-    }
-
-    applyHeadingLevel(element["w:p"] as XNode[], level);
-
-    serializeDocXml(handle, parsed);
-    await saveDocx(handle);
-
-    return `Set block ${paragraphIndex} to Heading ${level} in ${path.basename(filePath)}.`;
-  });
-}
-
 // ---------------------------------------------------------------------------
-// 16b. set_headings
+// 16. set_headings
 // ---------------------------------------------------------------------------
 
 export interface SetHeadingItem {
@@ -2530,10 +2384,6 @@ export async function readHeaderFooter(filePath: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// 22. edit_table_cell
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Shared helper: replace cell text content in-place
 // ---------------------------------------------------------------------------
 
@@ -2589,39 +2439,8 @@ function getTableCellParagraph(
   return paraEl;
 }
 
-export async function editTableCell(
-  filePath: string,
-  blockIndex: number,
-  rowIndex: number,
-  colIndex: number,
-  newText: string,
-  trackChanges: boolean = true,
-  author: string = "Claude",
-): Promise<string> {
-  return withFileLock(filePath, async () => {
-    const handle = await openDocx(filePath);
-    const parsed = await parseDocXml(handle);
-    const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
-
-    const paraEl = getTableCellParagraph(body, bodyIdxs, blockIndex, rowIndex, colIndex);
-
-    const ctx = trackChanges
-      ? newRevisionContext(scanMaxId(parsed) + 1, author)
-      : null;
-
-    replaceCellText(paraEl, newText, ctx);
-
-    serializeDocXml(handle, parsed);
-    await saveDocx(handle);
-
-    const mode = trackChanges ? " (tracked)" : "";
-    return `Updated cell [${rowIndex},${colIndex}] in table at block ${blockIndex}${mode}.`;
-  });
-}
-
 // ---------------------------------------------------------------------------
-// 22b. edit_table_cells (bulk)
+// 22. edit_table_cells
 // ---------------------------------------------------------------------------
 
 export interface EditTableCellItem {

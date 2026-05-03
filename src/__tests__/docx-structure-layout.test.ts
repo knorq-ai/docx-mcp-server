@@ -4,8 +4,8 @@ import {
   createTmpDoc,
   cleanupTmpFiles,
   readRawDocXml,
-  readRawStylesXml,
   readRawHeaderXml,
+  readRawStylesXml,
   tmpDocxPath,
   trackTmpFile,
   createDocWithMoveTracking,
@@ -24,10 +24,10 @@ import {
   acceptAllChanges,
   rejectAllChanges,
   readDocument,
-  replaceText,
-  editParagraph,
-  insertParagraph,
-  deleteParagraph,
+  replaceTexts,
+  editParagraphs,
+  insertParagraphs,
+  deleteParagraphs,
   getDocumentInfo,
 } from "../docx-engine.js";
 
@@ -80,7 +80,7 @@ describe("createDocument", () => {
   it("creates parent directories if needed", async () => {
     const p = tmpDocxPath().replace(".docx", "/sub/dir/test.docx");
     trackTmpFile(p);
-    await createDocument(p, undefined, "Nested");
+    await createDocument(p, "Nested");
     const stat = await fs.stat(p);
     expect(stat.size).toBeGreaterThan(0);
     // Clean up nested dirs
@@ -93,7 +93,7 @@ describe("createDocument", () => {
   it("produced docx has proper XML structure", async () => {
     const p = tmpDocxPath();
     trackTmpFile(p);
-    await createDocument(p, undefined, "Test");
+    await createDocument(p, "Test");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:document");
     expect(xml).toContain("w:body");
@@ -149,7 +149,7 @@ describe("createDocument", () => {
 
   it("created document can be edited by other functions", async () => {
     const p = await createTmpDoc("Editable content");
-    await replaceText(p, "content", "text", false, false);
+    await replaceTexts(p, [{ search: "content", replace: "text" }], false);
     const doc = await readDocument(p);
     expect(doc).toContain("Editable text");
   });
@@ -343,7 +343,7 @@ describe("setPageLayout", () => {
 describe("acceptAllChanges", () => {
   it("removes w:del elements and unwraps w:ins", async () => {
     const p = await createTmpDoc("Hello old world");
-    await replaceText(p, "old", "new", false, true);
+    await replaceTexts(p, [{ search: "old", replace: "new" }], true);
 
     // Before accept: should have del/ins
     let xml = await readRawDocXml(p);
@@ -361,7 +361,7 @@ describe("acceptAllChanges", () => {
 
   it("accepted text becomes permanent", async () => {
     const p = await createTmpDoc("Replace me");
-    await replaceText(p, "me", "you", false, true);
+    await replaceTexts(p, [{ search: "me", replace: "you" }], true);
     await acceptAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("Replace you");
@@ -371,7 +371,7 @@ describe("acceptAllChanges", () => {
 
   it("accepts tracked paragraph edit", async () => {
     const p = await createTmpDoc("Old text");
-    await editParagraph(p, 0, "New text", true);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "New text" }], true);
     await acceptAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("New text");
@@ -382,7 +382,7 @@ describe("acceptAllChanges", () => {
 
   it("accepts tracked paragraph insert", async () => {
     const p = await createTmpDoc("Existing");
-    await insertParagraph(p, "Inserted", -1, undefined, true);
+    await insertParagraphs(p, [{ text: "Inserted", position: -1 }], true);
     await acceptAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("Inserted");
@@ -392,7 +392,7 @@ describe("acceptAllChanges", () => {
 
   it("accepts tracked paragraph deletion (removes deleted content)", async () => {
     const p = await createTmpDoc("Keep this\nDelete this");
-    await deleteParagraph(p, 1, true);
+    await deleteParagraphs(p, [1], true);
     await acceptAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("Keep this");
@@ -404,7 +404,7 @@ describe("acceptAllChanges", () => {
 
   it("cleans pPr > rPr > w:ins/w:del markers", async () => {
     const p = await createTmpDoc("To delete");
-    await deleteParagraph(p, 0, true);
+    await deleteParagraphs(p, [0], true);
     let xml = await readRawDocXml(p);
     // Before: should have pPr > rPr > w:del marker
     expect(xml).toContain("w:del");
@@ -423,7 +423,7 @@ describe("acceptAllChanges", () => {
 describe("rejectAllChanges", () => {
   it("removes w:ins elements and unwraps w:del (restores original)", async () => {
     const p = await createTmpDoc("Hello old world");
-    await replaceText(p, "old", "new", false, true);
+    await replaceTexts(p, [{ search: "old", replace: "new" }], true);
 
     await rejectAllChanges(p);
 
@@ -435,7 +435,7 @@ describe("rejectAllChanges", () => {
 
   it("restores original text after reject", async () => {
     const p = await createTmpDoc("Original text");
-    await replaceText(p, "Original", "Changed", false, true);
+    await replaceTexts(p, [{ search: "Original", replace: "Changed" }], true);
     await rejectAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("Original");
@@ -444,7 +444,7 @@ describe("rejectAllChanges", () => {
 
   it("converts w:delText back to w:t", async () => {
     const p = await createTmpDoc("Delete this word");
-    await replaceText(p, "this", "that", false, true);
+    await replaceTexts(p, [{ search: "this", replace: "that" }], true);
 
     // Before reject: has w:delText
     let xml = await readRawDocXml(p);
@@ -460,7 +460,7 @@ describe("rejectAllChanges", () => {
 
   it("rejects tracked paragraph edit (restores old content)", async () => {
     const p = await createTmpDoc("Original paragraph");
-    await editParagraph(p, 0, "Modified paragraph", true);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "Modified paragraph" }], true);
     await rejectAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("Original paragraph");
@@ -469,7 +469,7 @@ describe("rejectAllChanges", () => {
 
   it("rejects tracked paragraph insert (removes it)", async () => {
     const p = await createTmpDoc("Existing only");
-    await insertParagraph(p, "Should disappear", -1, undefined, true);
+    await insertParagraphs(p, [{ text: "Should disappear", position: -1 }], true);
     await rejectAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("Existing only");
@@ -478,7 +478,7 @@ describe("rejectAllChanges", () => {
 
   it("rejects tracked paragraph deletion (restores deleted text)", async () => {
     const p = await createTmpDoc("Keep me\nRestore me");
-    await deleteParagraph(p, 1, true);
+    await deleteParagraphs(p, [1], true);
 
     // Before reject: deleted text is hidden in default view
     let doc = await readDocument(p, undefined, undefined, false);
@@ -490,7 +490,7 @@ describe("rejectAllChanges", () => {
 
   it("cleans pPr > rPr > w:ins/w:del markers", async () => {
     const p = await createTmpDoc("Tracked insert");
-    await insertParagraph(p, "New para", -1, undefined, true);
+    await insertParagraphs(p, [{ text: "New para", position: -1 }], true);
     await rejectAllChanges(p);
     const xml = await readRawDocXml(p);
     expect(xml).not.toContain("w:ins");

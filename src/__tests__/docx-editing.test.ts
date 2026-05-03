@@ -10,10 +10,9 @@ import {
 } from "./helpers.js";
 import {
   readDocument,
-  replaceText,
-  editParagraph,
-  insertParagraph,
-  deleteParagraph,
+  replaceTexts,
+  editParagraphs,
+  insertParagraphs,
   deleteParagraphs,
   acceptAllChanges,
   rejectAllChanges,
@@ -22,13 +21,13 @@ import {
 afterEach(cleanupTmpFiles);
 
 // =========================================================================
-// replaceText — untracked
+// replaceTexts (single-item) — untracked
 // =========================================================================
 
-describe("replaceText (untracked)", () => {
+describe("replaceTexts (untracked, single item)", () => {
   it("replaces text in a single paragraph", async () => {
     const p = await createTmpDoc("Hello old world");
-    const result = await replaceText(p, "old", "new", false, false);
+    const result = await replaceTexts(p, [{ search: "old", replace: "new" }], false);
     expect(result).toContain("1 occurrence");
     const doc = await readDocument(p);
     expect(doc).toContain("Hello new world");
@@ -36,7 +35,7 @@ describe("replaceText (untracked)", () => {
 
   it("replaces multiple occurrences", async () => {
     const p = await createTmpDoc("foo bar foo baz foo");
-    const result = await replaceText(p, "foo", "qux", false, false);
+    const result = await replaceTexts(p, [{ search: "foo", replace: "qux" }], false);
     expect(result).toContain("3 occurrence");
     const doc = await readDocument(p);
     expect(doc).toContain("qux bar qux baz qux");
@@ -44,13 +43,17 @@ describe("replaceText (untracked)", () => {
 
   it("performs case-insensitive replacement by default", async () => {
     const p = await createTmpDoc("Hello HELLO hello");
-    const result = await replaceText(p, "hello", "Hi", false, false);
+    const result = await replaceTexts(p, [{ search: "hello", replace: "Hi" }], false);
     expect(result).toContain("3 occurrence");
   });
 
   it("performs case-sensitive replacement when requested", async () => {
     const p = await createTmpDoc("Hello HELLO hello");
-    const result = await replaceText(p, "Hello", "Hi", true, false);
+    const result = await replaceTexts(
+      p,
+      [{ search: "Hello", replace: "Hi", caseSensitive: true }],
+      false,
+    );
     expect(result).toContain("1 occurrence");
     const doc = await readDocument(p);
     expect(doc).toContain("Hi");
@@ -60,13 +63,13 @@ describe("replaceText (untracked)", () => {
 
   it("reports no occurrences when text is absent", async () => {
     const p = await createTmpDoc("Hello world");
-    const result = await replaceText(p, "xyz", "abc", false, false);
+    const result = await replaceTexts(p, [{ search: "xyz", replace: "abc" }], false);
     expect(result).toContain("No occurrences");
   });
 
   it("handles cross-run text replacement", async () => {
     const p = await createCrossRunDoc(["Hel", "lo Wor", "ld"]);
-    const result = await replaceText(p, "Hello World", "Hi", false, false);
+    const result = await replaceTexts(p, [{ search: "Hello World", replace: "Hi" }], false);
     expect(result).toContain("1 occurrence");
     const doc = await readDocument(p);
     expect(doc).toContain("Hi");
@@ -75,13 +78,13 @@ describe("replaceText (untracked)", () => {
 });
 
 // =========================================================================
-// replaceText — tracked
+// replaceTexts (single-item) — tracked
 // =========================================================================
 
-describe("replaceText (tracked)", () => {
+describe("replaceTexts (tracked, single item)", () => {
   it("creates w:del and w:ins markup", async () => {
     const p = await createTmpDoc("Hello old world");
-    await replaceText(p, "old", "new", false, true, "TestAuthor");
+    await replaceTexts(p, [{ search: "old", replace: "new" }], true, "TestAuthor");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:del");
     expect(xml).toContain("w:ins");
@@ -91,7 +94,7 @@ describe("replaceText (tracked)", () => {
 
   it("preserves original text in w:delText", async () => {
     const p = await createTmpDoc("Replace me please");
-    await replaceText(p, "me", "you", false, true);
+    await replaceTexts(p, [{ search: "me", replace: "you" }], true);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:delText");
     // The accepted view should show the new text
@@ -101,7 +104,7 @@ describe("replaceText (tracked)", () => {
 
   it("sets author and date attributes on revisions", async () => {
     const p = await createTmpDoc("Some text");
-    await replaceText(p, "text", "content", false, true, "Alice");
+    await replaceTexts(p, [{ search: "text", replace: "content" }], true, "Alice");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Alice");
     // Date should be an ISO string
@@ -110,7 +113,7 @@ describe("replaceText (tracked)", () => {
 
   it("handles cross-run tracked replacement", async () => {
     const p = await createCrossRunDoc(["Hel", "lo Wor", "ld"]);
-    await replaceText(p, "Hello World", "Hi Earth", false, true);
+    await replaceTexts(p, [{ search: "Hello World", replace: "Hi Earth" }], true);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:del");
     expect(xml).toContain("w:ins");
@@ -120,14 +123,14 @@ describe("replaceText (tracked)", () => {
 
   it("default author is Claude", async () => {
     const p = await createTmpDoc("Test text");
-    await replaceText(p, "text", "data", false, true);
+    await replaceTexts(p, [{ search: "text", replace: "data" }], true);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Claude");
   });
 
   it("shows revision annotations in show_revisions mode", async () => {
     const p = await createTmpDoc("Before change");
-    await replaceText(p, "change", "modification", false, true);
+    await replaceTexts(p, [{ search: "change", replace: "modification" }], true);
     const result = await readDocument(p, undefined, undefined, true);
     expect(result).toContain("[-change-]");
     expect(result).toContain("[+modification+]");
@@ -135,10 +138,10 @@ describe("replaceText (tracked)", () => {
 });
 
 // =========================================================================
-// replaceText — inline SDT (Google Docs export pattern)
+// replaceTexts — inline SDT (Google Docs export pattern)
 // =========================================================================
 
-describe("replaceText with inline w:sdt", () => {
+describe("replaceTexts with inline w:sdt", () => {
   it("reads text from inline SDT", async () => {
     const p = await createDocWithInlineSdt("Hello SDT world");
     const doc = await readDocument(p);
@@ -147,7 +150,7 @@ describe("replaceText with inline w:sdt", () => {
 
   it("replaces text inside inline SDT (untracked)", async () => {
     const p = await createDocWithInlineSdt("Hello SDT world");
-    const result = await replaceText(p, "SDT", "replaced", false, false);
+    const result = await replaceTexts(p, [{ search: "SDT", replace: "replaced" }], false);
     expect(result).toContain("1 occurrence");
     const doc = await readDocument(p);
     expect(doc).toContain("Hello replaced world");
@@ -155,7 +158,7 @@ describe("replaceText with inline w:sdt", () => {
 
   it("replaces text inside inline SDT (tracked)", async () => {
     const p = await createDocWithInlineSdt("Hello SDT world");
-    await replaceText(p, "SDT", "tracked", false, true, "TestAuthor");
+    await replaceTexts(p, [{ search: "SDT", replace: "tracked" }], true, "TestAuthor");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:del");
     expect(xml).toContain("w:ins");
@@ -167,7 +170,7 @@ describe("replaceText with inline w:sdt", () => {
 
   it("tracked replacement preserves SDT structure", async () => {
     const p = await createDocWithInlineSdt("Replace me here");
-    await replaceText(p, "me", "you", false, true);
+    await replaceTexts(p, [{ search: "me", replace: "you" }], true);
     const xml = await readRawDocXml(p);
     // sdtPr with tag should still exist
     expect(xml).toContain("goog_rdk_0");
@@ -179,11 +182,11 @@ describe("replaceText with inline w:sdt", () => {
 // editParagraph
 // =========================================================================
 
-describe("editParagraph", () => {
+describe("editParagraphs (single item)", () => {
   it("replaces paragraph content (untracked)", async () => {
     const p = await createTmpDoc("Original text\nSecond para");
-    const result = await editParagraph(p, 0, "New text", false);
-    expect(result).toContain("Updated paragraph 0");
+    const result = await editParagraphs(p, [{ paragraphIndex: 0, newText: "New text" }], false);
+    expect(result).toContain("Updated 1 paragraph(s)");
     const doc = await readDocument(p);
     expect(doc).toContain("New text");
     expect(doc).not.toContain("Original text");
@@ -191,7 +194,7 @@ describe("editParagraph", () => {
 
   it("replaces paragraph content (tracked) with w:del and w:ins", async () => {
     const p = await createTmpDoc("Old content here");
-    await editParagraph(p, 0, "New content here", true, "Editor");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "New content here" }], true, "Editor");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:del");
     expect(xml).toContain("w:ins");
@@ -203,7 +206,7 @@ describe("editParagraph", () => {
   it("preserves paragraph style after edit", async () => {
     const p = await createTmpDoc("Body", "Title");
     // Edit the title (index 0 which has Heading1 style)
-    await editParagraph(p, 0, "Updated Title", false);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "Updated Title" }], false);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Heading1");
     const doc = await readDocument(p);
@@ -212,14 +215,14 @@ describe("editParagraph", () => {
 
   it("throws INDEX_OUT_OF_RANGE for out-of-range index", async () => {
     const p = await createTmpDoc("Solo paragraph");
-    await expect(editParagraph(p, 99, "New text", false)).rejects.toMatchObject({
+    await expect(editParagraphs(p, [{ paragraphIndex: 99, newText: "New text" }], false)).rejects.toMatchObject({
       code: "INDEX_OUT_OF_RANGE",
     });
   });
 
   it("tracked edit shows revisions correctly", async () => {
     const p = await createTmpDoc("Before editing");
-    await editParagraph(p, 0, "After editing", true);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "After editing" }], true);
     const rev = await readDocument(p, undefined, undefined, true);
     // Minimal diff: "Before" → "After", common suffix " editing" is plain text
     expect(rev).toContain("[-Before-]");
@@ -232,10 +235,10 @@ describe("editParagraph", () => {
 // insertParagraph
 // =========================================================================
 
-describe("insertParagraph", () => {
+describe("insertParagraphs (single item)", () => {
   it("inserts at position 0 (untracked)", async () => {
     const p = await createTmpDoc("Existing paragraph");
-    await insertParagraph(p, "Inserted first", 0, undefined, false);
+    await insertParagraphs(p, [{ text: "Inserted first", position: 0 }], false);
     const doc = await readDocument(p);
     expect(doc).toMatch(/\[0\].*Inserted first/);
     expect(doc).toMatch(/\[1\].*Existing paragraph/);
@@ -243,7 +246,7 @@ describe("insertParagraph", () => {
 
   it("inserts at end with position=-1 (untracked)", async () => {
     const p = await createTmpDoc("First paragraph");
-    await insertParagraph(p, "Last paragraph", -1, undefined, false);
+    await insertParagraphs(p, [{ text: "Last paragraph", position: -1 }], false);
     const doc = await readDocument(p);
     expect(doc).toContain("First paragraph");
     expect(doc).toContain("Last paragraph");
@@ -251,7 +254,7 @@ describe("insertParagraph", () => {
 
   it("inserts with style", async () => {
     const p = await createTmpDoc("Body text");
-    await insertParagraph(p, "Section Title", 0, "Heading2", false);
+    await insertParagraphs(p, [{ text: "Section Title", position: 0, style: "Heading2" }], false);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Heading2");
     const doc = await readDocument(p);
@@ -260,7 +263,7 @@ describe("insertParagraph", () => {
 
   it("inserts tracked paragraph with w:ins wrapper", async () => {
     const p = await createTmpDoc("Existing content");
-    await insertParagraph(p, "New tracked para", -1, undefined, true, "Bob");
+    await insertParagraphs(p, [{ text: "New tracked para", position: -1 }], true, "Bob");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:ins");
     expect(xml).toContain("Bob");
@@ -270,7 +273,7 @@ describe("insertParagraph", () => {
 
   it("tracked insert has pPr rPr ins marker", async () => {
     const p = await createTmpDoc("Content");
-    await insertParagraph(p, "Tracked", -1, undefined, true);
+    await insertParagraphs(p, [{ text: "Tracked", position: -1 }], true);
     const xml = await readRawDocXml(p);
     // Should have w:ins inside w:rPr inside w:pPr (paragraph break marker)
     expect(xml).toContain("w:pPr");
@@ -279,7 +282,7 @@ describe("insertParagraph", () => {
 
   it("inserts with numId and numLevel (untracked)", async () => {
     const p = await createTmpDoc("Existing");
-    await insertParagraph(p, "Numbered item", -1, undefined, false, "Claude", 14, 0);
+    await insertParagraphs(p, [{ text: "Numbered item", position: -1, numId: 14, numLevel: 0 }], false);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:numPr");
     expect(xml).toContain("w:numId");
@@ -289,7 +292,7 @@ describe("insertParagraph", () => {
 
   it("inserts with numId and custom numLevel", async () => {
     const p = await createTmpDoc("Existing");
-    await insertParagraph(p, "Sub-item", -1, undefined, false, "Claude", 5, 2);
+    await insertParagraphs(p, [{ text: "Sub-item", position: -1, numId: 5, numLevel: 2 }], false);
     const xml = await readRawDocXml(p);
     expect(xml).toMatch(/w:numId[^>]*w:val="5"/);
     expect(xml).toMatch(/w:ilvl[^>]*w:val="2"/);
@@ -297,7 +300,7 @@ describe("insertParagraph", () => {
 
   it("inserts with numId combined with style", async () => {
     const p = await createTmpDoc("Existing");
-    await insertParagraph(p, "Heading item", -1, "Heading1", false, "Claude", 14, 0);
+    await insertParagraphs(p, [{ text: "Heading item", position: -1, style: "Heading1", numId: 14, numLevel: 0 }], false);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Heading1");
     expect(xml).toContain("w:numPr");
@@ -305,7 +308,7 @@ describe("insertParagraph", () => {
 
   it("inserts with numId tracked", async () => {
     const p = await createTmpDoc("Existing");
-    await insertParagraph(p, "Tracked numbered", -1, undefined, true, "Claude", 14, 0);
+    await insertParagraphs(p, [{ text: "Tracked numbered", position: -1, numId: 14, numLevel: 0 }], true);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:numPr");
     expect(xml).toContain("w:ins");
@@ -314,9 +317,9 @@ describe("insertParagraph", () => {
   it("inserts with copy_format_from (untracked)", async () => {
     const p = await createTmpDoc("Existing");
     // First, insert a paragraph with numbering to use as source
-    await insertParagraph(p, "Source heading", 0, "Heading1", false, "Claude", 14, 0);
+    await insertParagraphs(p, [{ text: "Source heading", position: 0, style: "Heading1", numId: 14, numLevel: 0 }], false);
     // Now insert a new paragraph copying format from index 0
-    await insertParagraph(p, "Copied format", -1, undefined, false, "Claude", undefined, undefined, 0);
+    await insertParagraphs(p, [{ text: "Copied format", position: -1, copyFormatFrom: 0 }], false);
     const xml = await readRawDocXml(p);
     // The last paragraph should have the same numPr as the source
     // Count occurrences of numId=14 — should appear twice
@@ -327,9 +330,9 @@ describe("insertParagraph", () => {
 
   it("inserts with copy_format_from (tracked)", async () => {
     const p = await createTmpDoc("Existing");
-    await insertParagraph(p, "Source", 0, "Heading2", false);
+    await insertParagraphs(p, [{ text: "Source", position: 0, style: "Heading2" }], false);
     // Copy format from the Heading2 paragraph with tracking
-    await insertParagraph(p, "Copied tracked", -1, undefined, true, "Bob", undefined, undefined, 0);
+    await insertParagraphs(p, [{ text: "Copied tracked", position: -1, copyFormatFrom: 0 }], true, "Bob");
     const xml = await readRawDocXml(p);
     // Should have Heading2 style in the copied pPr and w:ins for tracking
     expect(xml).toContain("Heading2");
@@ -340,14 +343,14 @@ describe("insertParagraph", () => {
   it("copy_format_from throws on invalid index", async () => {
     const p = await createTmpDoc("Only one paragraph");
     await expect(
-      insertParagraph(p, "Bad ref", -1, undefined, false, "Claude", undefined, undefined, 999),
+      insertParagraphs(p, [{ text: "Bad ref", position: -1, copyFormatFrom: 999 }], false),
     ).rejects.toThrow(/out of range/);
   });
 
   it("copy_format_from a paragraph with no pPr produces plain paragraph", async () => {
     const p = await createTmpDoc("No formatting here");
     // Block 0 has no pPr — copy_format_from should fall back to no-format insert
-    await insertParagraph(p, "Plain copy", -1, undefined, false, "Claude", undefined, undefined, 0);
+    await insertParagraphs(p, [{ text: "Plain copy", position: -1, copyFormatFrom: 0 }], false);
     const xml = await readRawDocXml(p);
     // The new paragraph should exist and have text, but no extra pPr
     expect(xml).toContain("Plain copy");
@@ -359,14 +362,14 @@ describe("insertParagraph", () => {
     await insertTable(p, -1, 2, 2);
     // Block 1 is now a table
     await expect(
-      insertParagraph(p, "Bad", -1, undefined, false, "Claude", undefined, undefined, 1),
+      insertParagraphs(p, [{ text: "Bad", position: -1, copyFormatFrom: 1 }], false),
     ).rejects.toThrow(/not a paragraph/);
   });
 
   it("copy_format_from strips stale revision markers from source pPr (tracked)", async () => {
     const p = await createDocWithTrackedPPr("Source with tracked rPr");
     // Block 0 has w:ins from OldAuthor in its pPr > rPr
-    await insertParagraph(p, "Fresh copy", -1, undefined, true, "NewAuthor", undefined, undefined, 0);
+    await insertParagraphs(p, [{ text: "Fresh copy", position: -1, copyFormatFrom: 0 }], true, "NewAuthor");
     const xml = await readRawDocXml(p);
     // Should NOT contain OldAuthor in the new paragraph's pPr
     // The last w:ins in the doc should be from NewAuthor
@@ -381,7 +384,7 @@ describe("insertParagraph", () => {
     const p = await createDocWithTrackedPPr("Source with tracked rPr");
     // Block 0 has w:ins from OldAuthor in its pPr > rPr
     // Insert with track_changes=false — new paragraph must NOT carry OldAuthor's marker
-    await insertParagraph(p, "Untracked copy", -1, undefined, false, "Claude", undefined, undefined, 0);
+    await insertParagraphs(p, [{ text: "Untracked copy", position: -1, copyFormatFrom: 0 }], false);
     const xml = await readRawDocXml(p);
     // Count w:author="OldAuthor" — should appear only once (the original paragraph)
     const oldAuthorMatches = [...xml.matchAll(/w:author="OldAuthor"/g)];
@@ -395,7 +398,7 @@ describe("insertParagraph", () => {
       indentLeft: 720,
     });
     // Copy format from block 0 to a new paragraph
-    await insertParagraph(p, "第2条 遡及適用", -1, undefined, false, "Claude", undefined, undefined, 0);
+    await insertParagraphs(p, [{ text: "第2条 遡及適用", position: -1, copyFormatFrom: 0 }], false);
     const xml = await readRawDocXml(p);
     // Should have two paragraphs with Heading1, numId=14, center alignment, indent
     expect((xml.match(/Heading1/g) || []).length).toBeGreaterThanOrEqual(2);
@@ -407,7 +410,7 @@ describe("insertParagraph", () => {
   it("copy_format_from overrides style and num_id when both provided", async () => {
     const p = await createDocWithNumberedParagraph("Source", 14, 0, { style: "Heading1" });
     // Provide style=Heading3 and num_id=99, but copy_format_from=0 should win
-    await insertParagraph(p, "Should get Heading1", -1, "Heading3", false, "Claude", 99, 1, 0);
+    await insertParagraphs(p, [{ text: "Should get Heading1", position: -1, style: "Heading3", numId: 99, numLevel: 1, copyFormatFrom: 0 }], false);
     const xml = await readRawDocXml(p);
     // Heading3 and numId=99 should NOT appear; Heading1 and numId=14 should appear twice
     expect(xml).not.toContain("Heading3");
@@ -418,7 +421,7 @@ describe("insertParagraph", () => {
 
   it("num_level without num_id does not emit numPr", async () => {
     const p = await createTmpDoc("Existing");
-    await insertParagraph(p, "No numbering", -1, undefined, false, "Claude", undefined, 2);
+    await insertParagraphs(p, [{ text: "No numbering", position: -1, numLevel: 2 }], false);
     const xml = await readRawDocXml(p);
     expect(xml).not.toContain("w:numPr");
   });
@@ -428,10 +431,10 @@ describe("insertParagraph", () => {
 // deleteParagraph
 // =========================================================================
 
-describe("deleteParagraph", () => {
+describe("deleteParagraphs (single item)", () => {
   it("removes paragraph physically (untracked)", async () => {
     const p = await createTmpDoc("Para A\nPara B\nPara C");
-    await deleteParagraph(p, 1, false);
+    await deleteParagraphs(p, [1], false);
     const doc = await readDocument(p);
     expect(doc).toContain("Para A");
     expect(doc).not.toContain("Para B");
@@ -441,7 +444,7 @@ describe("deleteParagraph", () => {
 
   it("marks paragraph as deleted (tracked)", async () => {
     const p = await createTmpDoc("Para A\nPara B");
-    await deleteParagraph(p, 0, true, "Deleter");
+    await deleteParagraphs(p, [0], true, "Deleter");
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:del");
     expect(xml).toContain("w:delText");
@@ -453,14 +456,14 @@ describe("deleteParagraph", () => {
 
   it("throws INDEX_OUT_OF_RANGE for out-of-range index", async () => {
     const p = await createTmpDoc("Only one");
-    await expect(deleteParagraph(p, 5, false)).rejects.toMatchObject({
+    await expect(deleteParagraphs(p, [5], false)).rejects.toMatchObject({
       code: "INDEX_OUT_OF_RANGE",
     });
   });
 
   it("tracked deletion converts runs to w:delText", async () => {
     const p = await createTmpDoc("Delete me tracked");
-    await deleteParagraph(p, 0, true);
+    await deleteParagraphs(p, [0], true);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:delText");
     // Also adds pPr > rPr > w:del marker
@@ -469,7 +472,7 @@ describe("deleteParagraph", () => {
 
   it("tracked deletion shows in revision view", async () => {
     const p = await createTmpDoc("Will be deleted");
-    await deleteParagraph(p, 0, true);
+    await deleteParagraphs(p, [0], true);
     const rev = await readDocument(p, undefined, undefined, true);
     expect(rev).toContain("[-Will be deleted-]");
   });
@@ -530,37 +533,37 @@ describe("deleteParagraphs", () => {
 // =========================================================================
 
 describe("XML entity handling", () => {
-  it("round-trips text with ampersand via editParagraph", async () => {
+  it("round-trips text with ampersand via editParagraphs", async () => {
     const p = await createTmpDoc("Hello world");
-    await editParagraph(p, 0, "AT&T and <tags> work", false);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "AT&T and <tags> work" }], false);
     const result = await readDocument(p);
     expect(result).toContain("AT&T and <tags> work");
   });
 
-  it("round-trips text with ampersand via replaceText (untracked)", async () => {
+  it("round-trips text with ampersand via replaceTexts (untracked)", async () => {
     const p = await createTmpDoc("Hello world");
-    await replaceText(p, "world", "R&D dept", false, false);
+    await replaceTexts(p, [{ search: "world", replace: "R&D dept" }], false);
     const result = await readDocument(p);
     expect(result).toContain("Hello R&D dept");
   });
 
-  it("round-trips text with ampersand via replaceText (tracked)", async () => {
+  it("round-trips text with ampersand via replaceTexts (tracked)", async () => {
     const p = await createTmpDoc("Hello world");
-    await replaceText(p, "world", "R&D dept", false, true);
+    await replaceTexts(p, [{ search: "world", replace: "R&D dept" }], true);
     const result = await readDocument(p);
     expect(result).toContain("Hello R&D dept");
   });
 
-  it("round-trips text with ampersand via insertParagraph", async () => {
+  it("round-trips text with ampersand via insertParagraphs", async () => {
     const p = await createTmpDoc("First");
-    await insertParagraph(p, "A<B & C>D", -1, undefined, false);
+    await insertParagraphs(p, [{ text: "A<B & C>D", position: -1 }], false);
     const result = await readDocument(p);
     expect(result).toContain("A<B & C>D");
   });
 
   it("produces valid XML when text contains special chars", async () => {
     const p = await createTmpDoc("Hello world");
-    await editParagraph(p, 0, "AT&T <Corp> \"quoted\"", false);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "AT&T <Corp> \"quoted\"" }], false);
     const raw = await readRawDocXml(p);
     // The raw XML should contain proper entity encoding
     expect(raw).toContain("&amp;");

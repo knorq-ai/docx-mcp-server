@@ -17,15 +17,11 @@ import {
   readDocument,
   getDocumentInfo,
   searchText,
-  replaceText,
-  editParagraph,
+  replaceTexts,
   editParagraphs,
-  insertParagraph,
   insertParagraphs,
-  deleteParagraph,
   deleteParagraphs,
   formatText,
-  setParagraphFormat,
   setParagraphFormats,
   addComment,
   addComments,
@@ -36,14 +32,12 @@ import {
   applyDocumentPreset,
   highlightText,
   insertTable,
-  setHeading,
   setHeadings,
   getPageLayout,
   setPageLayout,
   acceptAllChanges,
   rejectAllChanges,
   readHeaderFooter,
-  editTableCell,
   editTableCells,
   readFootnotes,
   listImages,
@@ -200,27 +194,35 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Tool: replace_text
+// Tool: replace_texts (bulk)
 // ---------------------------------------------------------------------------
 
 server.tool(
-  "replace_text",
-  "Find and replace text throughout a DOCX file. Handles text that spans multiple runs. Returns the number of replacements made.",
+  "replace_texts",
+  "Apply one or more find/replace operations in a single open/save cycle. Use a one-element items array for a single substitution; use multiple items to batch many substitutions efficiently. Items are applied sequentially in the given order.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    search: z.string().describe("Text to find"),
-    replace: z.string().describe("Replacement text"),
-    case_sensitive: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe("Case-sensitive matching"),
+    items: z
+      .array(
+        z.object({
+          search: z.string().min(1).describe("Text to find (non-empty)"),
+          replace: z.string().describe("Replacement text"),
+          case_sensitive: z
+            .boolean()
+            .optional()
+            .default(false)
+            .describe("Case-sensitive matching for this item"),
+        }),
+      )
+      .describe(
+        "Array of find/replace pairs, applied sequentially in the given order. Under track_changes=false, a later item can match against text produced by an earlier item (e.g. alpha→beta then beta→gamma yields gamma). Under track_changes=true, the engine rejects overlapping items (where item N's search matches item M's replace, M<N) with INVALID_PARAMETER — issue separate replace_texts calls instead.",
+      ),
     track_changes: z
       .boolean()
       .optional()
       .default(true)
       .describe(
-        "Record edits as tracked changes (w:del/w:ins) so they appear as revisions in Word. Default true.",
+        "Record edits as tracked changes (w:del/w:ins). Default true.",
       ),
     author: z
       .string()
@@ -240,70 +242,19 @@ server.tool(
       .default(false)
       .describe("Also replace text in headers and footers. Default false."),
   },
-  async ({ file_path, search, replace, case_sensitive, track_changes, author, include_headers_footers, allow_untracked_edit }) => {
+  async ({ file_path, items, track_changes, author, include_headers_footers, allow_untracked_edit }) => {
     try {
       assertTrackChanges(track_changes, allow_untracked_edit);
-      const result = await replaceText(
+      const result = await replaceTexts(
         file_path,
-        search,
-        replace,
-        case_sensitive,
+        items.map((it) => ({
+          search: it.search,
+          replace: it.replace,
+          caseSensitive: it.case_sensitive,
+        })),
         track_changes,
         author,
         include_headers_footers,
-      );
-      return { content: [{ type: "text", text: result }] };
-    } catch (e: unknown) {
-      return {
-        content: [{ type: "text", text: formatError(e) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Tool: edit_paragraph
-// ---------------------------------------------------------------------------
-
-server.tool(
-  "edit_paragraph",
-  "Replace the entire text content of a specific paragraph (by index). Preserves the paragraph's style and formatting properties.",
-  {
-    file_path: z.string().describe("Absolute path to the .docx file"),
-    paragraph_index: z
-      .number()
-      .describe("Index of the paragraph to edit (from read_document output)"),
-    new_text: z.string().describe("New text content for the paragraph"),
-    track_changes: z
-      .boolean()
-      .optional()
-      .default(true)
-      .describe(
-        "Record edits as tracked changes (w:del/w:ins) so they appear as revisions in Word. Default true.",
-      ),
-    author: z
-      .string()
-      .optional()
-      .default("Claude")
-      .describe("Author name for tracked changes"),
-    allow_untracked_edit: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe(
-        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
-      ),
-  },
-  async ({ file_path, paragraph_index, new_text, track_changes, author, allow_untracked_edit }) => {
-    try {
-      assertTrackChanges(track_changes, allow_untracked_edit);
-      const result = await editParagraph(
-        file_path,
-        paragraph_index,
-        new_text,
-        track_changes,
-        author,
       );
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -366,80 +317,6 @@ server.tool(
         engineEdits,
         track_changes,
         author,
-      );
-      return { content: [{ type: "text", text: result }] };
-    } catch (e: unknown) {
-      return {
-        content: [{ type: "text", text: formatError(e) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Tool: insert_paragraph
-// ---------------------------------------------------------------------------
-
-server.tool(
-  "insert_paragraph",
-  "Insert a new paragraph at a specific position. Use style names like 'Heading1', 'Heading2', 'Normal', etc. Use position=-1 to append at the end. To reproduce Word's list-based numbering (e.g. 第1条, 第2条…), use num_id/num_level or copy_format_from.",
-  {
-    file_path: z.string().describe("Absolute path to the .docx file"),
-    text: z.string().describe("Text content of the new paragraph"),
-    position: z
-      .number()
-      .describe("Block index to insert before (-1 for end of document)"),
-    style: z
-      .string()
-      .optional()
-      .describe("Paragraph style (e.g., 'Heading1', 'Heading2', 'Normal')"),
-    num_id: z
-      .number()
-      .optional()
-      .describe("Numbering definition ID (w:numId). Produces <w:numPr> in the paragraph properties. Use with num_level. Ignored if copy_format_from is set."),
-    num_level: z
-      .number()
-      .optional()
-      .default(0)
-      .describe("Numbering indentation level (w:ilvl), 0-based. Default 0."),
-    copy_format_from: z
-      .number()
-      .optional()
-      .describe("Block index of an existing paragraph whose w:pPr to deep-copy (numbering, indentation, spacing, borders, etc.). When set, style/num_id/num_level are ignored."),
-    track_changes: z
-      .boolean()
-      .optional()
-      .default(true)
-      .describe(
-        "Record insertion as a tracked change so it appears as a revision in Word. Default true.",
-      ),
-    author: z
-      .string()
-      .optional()
-      .default("Claude")
-      .describe("Author name for tracked changes"),
-    allow_untracked_edit: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe(
-        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
-      ),
-  },
-  async ({ file_path, text, position, style, track_changes, author, num_id, num_level, copy_format_from, allow_untracked_edit }) => {
-    try {
-      assertTrackChanges(track_changes, allow_untracked_edit);
-      const result = await insertParagraph(
-        file_path,
-        text,
-        position,
-        style,
-        track_changes,
-        author,
-        num_id,
-        num_level,
-        copy_format_from,
       );
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -518,57 +395,6 @@ server.tool(
           numLevel: p.num_level,
           copyFormatFrom: p.copy_format_from,
         })),
-        track_changes,
-        author,
-      );
-      return { content: [{ type: "text", text: result }] };
-    } catch (e: unknown) {
-      return {
-        content: [{ type: "text", text: formatError(e) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Tool: delete_paragraph
-// ---------------------------------------------------------------------------
-
-server.tool(
-  "delete_paragraph",
-  "Delete a paragraph or table block by its index.",
-  {
-    file_path: z.string().describe("Absolute path to the .docx file"),
-    paragraph_index: z
-      .number()
-      .describe("Index of the block to delete"),
-    track_changes: z
-      .boolean()
-      .optional()
-      .default(true)
-      .describe(
-        "Record deletion as a tracked change instead of removing the paragraph. Default true.",
-      ),
-    author: z
-      .string()
-      .optional()
-      .default("Claude")
-      .describe("Author name for tracked changes"),
-    allow_untracked_edit: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe(
-        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
-      ),
-  },
-  async ({ file_path, paragraph_index, track_changes, author, allow_untracked_edit }) => {
-    try {
-      assertTrackChanges(track_changes, allow_untracked_edit);
-      const result = await deleteParagraph(
-        file_path,
-        paragraph_index,
         track_changes,
         author,
       );
@@ -706,90 +532,12 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Tool: set_paragraph_format
-// ---------------------------------------------------------------------------
-
-server.tool(
-  "set_paragraph_format",
-  "Set paragraph-level formatting: alignment, spacing, and indentation.",
-  {
-    file_path: z.string().describe("Absolute path to the .docx file"),
-    paragraph_index: z
-      .number()
-      .describe("Index of the paragraph to format"),
-    alignment: z
-      .enum(["left", "center", "right", "justify"])
-      .optional()
-      .describe("Text alignment"),
-    space_before: z
-      .number()
-      .optional()
-      .describe("Space before paragraph in points"),
-    space_after: z
-      .number()
-      .optional()
-      .describe("Space after paragraph in points"),
-    line_spacing: z
-      .number()
-      .optional()
-      .describe("Line spacing in points"),
-    indent_left: z
-      .number()
-      .optional()
-      .describe("Left indentation in twips (1440 twips = 1 inch)"),
-    indent_right: z
-      .number()
-      .optional()
-      .describe("Right indentation in twips"),
-    first_line_indent: z
-      .number()
-      .optional()
-      .describe("First line indent in twips"),
-    hanging_indent: z
-      .number()
-      .optional()
-      .describe("Hanging indent in twips"),
-  },
-  async ({
-    file_path,
-    paragraph_index,
-    alignment,
-    space_before,
-    space_after,
-    line_spacing,
-    indent_left,
-    indent_right,
-    first_line_indent,
-    hanging_indent,
-  }) => {
-    try {
-      const result = await setParagraphFormat(file_path, paragraph_index, {
-        alignment,
-        spaceBefore: space_before,
-        spaceAfter: space_after,
-        lineSpacing: line_spacing,
-        indentLeft: indent_left,
-        indentRight: indent_right,
-        firstLineIndent: first_line_indent,
-        hangingIndent: hanging_indent,
-      });
-      return { content: [{ type: "text", text: result }] };
-    } catch (e: unknown) {
-      return {
-        content: [{ type: "text", text: formatError(e) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
 // Tool: set_paragraph_formats
 // ---------------------------------------------------------------------------
 
 server.tool(
   "set_paragraph_formats",
-  "Apply paragraph formatting to multiple paragraphs in one operation. Much faster than calling set_paragraph_format repeatedly.",
+  "Apply alignment, spacing, and indentation to one or more paragraphs in a single open/save cycle. Each group bundles a list of paragraph indices with the formatting to apply to them.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     groups: z
@@ -1152,33 +900,6 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Tool: set_heading
-// ---------------------------------------------------------------------------
-
-server.tool(
-  "set_heading",
-  "Convert a paragraph to a heading with the specified level (1–9).",
-  {
-    file_path: z.string().describe("Absolute path to the .docx file"),
-    paragraph_index: z
-      .number()
-      .describe("Index of the paragraph to convert"),
-    level: z.number().min(1).max(9).describe("Heading level (1–9)"),
-  },
-  async ({ file_path, paragraph_index, level }) => {
-    try {
-      const result = await setHeading(file_path, paragraph_index, level);
-      return { content: [{ type: "text", text: result }] };
-    } catch (e: unknown) {
-      return {
-        content: [{ type: "text", text: formatError(e) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
 // Tool: set_headings
 // ---------------------------------------------------------------------------
 
@@ -1378,61 +1099,6 @@ server.tool(
   async ({ file_path }) => {
     try {
       const result = await readHeaderFooter(file_path);
-      return { content: [{ type: "text", text: result }] };
-    } catch (e: unknown) {
-      return {
-        content: [{ type: "text", text: formatError(e) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
-// Tool: edit_table_cell
-// ---------------------------------------------------------------------------
-
-server.tool(
-  "edit_table_cell",
-  "Replace the text content of a specific table cell identified by block index, row, and column.",
-  {
-    file_path: z.string().describe("Absolute path to the .docx file"),
-    block_index: z
-      .number()
-      .describe("Index of the table block (from read_document output)"),
-    row_index: z.number().describe("Zero-based row index"),
-    col_index: z.number().describe("Zero-based column index"),
-    new_text: z.string().describe("New text content for the cell"),
-    track_changes: z
-      .boolean()
-      .optional()
-      .default(true)
-      .describe("Record edits as tracked changes. Default true."),
-    author: z
-      .string()
-      .optional()
-      .default("Claude")
-      .describe("Author name for tracked changes"),
-    allow_untracked_edit: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe(
-        "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
-      ),
-  },
-  async ({ file_path, block_index, row_index, col_index, new_text, track_changes, author, allow_untracked_edit }) => {
-    try {
-      assertTrackChanges(track_changes, allow_untracked_edit);
-      const result = await editTableCell(
-        file_path,
-        block_index,
-        row_index,
-        col_index,
-        new_text,
-        track_changes,
-        author,
-      );
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {

@@ -11,19 +11,19 @@ A local [MCP](https://modelcontextprotocol.io/) server for reading and editing W
 | Category | Tools |
 |---|---|
 | **Read** | `read_document`, `get_document_info`, `search_text`, `list_images` |
-| **Edit** | `replace_text`, `edit_paragraph`, `edit_paragraphs`, `insert_paragraph`, `insert_paragraphs`, `delete_paragraph`, `delete_paragraphs` |
-| **Format** | `format_text`, `set_paragraph_format`, `set_paragraph_formats`, `highlight_text`, `set_heading`, `set_headings` |
+| **Edit** | `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs` |
+| **Format** | `format_text`, `set_paragraph_formats`, `highlight_text`, `set_headings` |
 | **Structure** | `insert_table`, `create_document`, `apply_document_preset` |
 | **Review** | `add_comment`, `add_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
 | **Headers/footers** | `read_header_footer` |
-| **Tables** | `edit_table_cell`, `edit_table_cells` |
+| **Tables** | `edit_table_cells` |
 | **Footnotes** | `read_footnotes` |
 
 ### Track changes
 
-The editing tools (`replace_text`, `edit_paragraph`, `insert_paragraph`, `delete_paragraph`) support **tracked changes** — edits are recorded as Word revisions (`w:ins`/`w:del`) with author and timestamp, so reviewers can accept or reject them in Word.
+The editing tools (`replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs`) support **tracked changes** — edits are recorded as Word revisions (`w:ins`/`w:del`) with author and timestamp, so reviewers can accept or reject them in Word.
 
 Track changes is **on by default**. Pass `track_changes: false` to make direct edits.
 
@@ -192,37 +192,24 @@ file_path
 
 All editing tools accept `track_changes` (default `true`) and `author` (default `"Claude"`).
 
-**`replace_text`** — Find and replace across the entire document. Handles text spanning multiple runs.
+**`replace_texts`** — Apply one or more find/replace operations in a single open/save cycle. Handles text spanning multiple runs.
+- Under `track_changes: false`, items are applied sequentially: a later item can match text produced by an earlier item.
+- Under `track_changes: true` (default), the engine rejects overlapping items where item N's `search` shares text with any earlier item M's `replace` (in either direction). Tracked sequential replacement cannot safely chain overlapping items — nested `w:ins`/`w:del` does not round-trip through `reject_all_changes`. Workaround: issue separate `replace_texts` calls (one per item) or use `track_changes: false` with `allow_untracked_edit: true`.
 ```
-file_path, search, replace, case_sensitive?, track_changes?, author?, include_headers_footers?
-```
-
-**`edit_paragraph`** — Replace a paragraph's text content by index.
-```
-file_path, paragraph_index, new_text, track_changes?, author?
+file_path, items (array of {search, replace, case_sensitive?}), track_changes?, author?, include_headers_footers?
 ```
 
-**`edit_paragraphs`** — Replace the text of multiple paragraphs in one operation. Single file read/write cycle.
+**`edit_paragraphs`** — Replace the text content of one or more paragraphs in a single open/save cycle.
 ```
 file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
 ```
 
-**`insert_paragraph`** — Insert a new paragraph at a position.
+**`insert_paragraphs`** — Insert one or more paragraphs in one operation. Handles index shifting internally.
 ```
-file_path, text, position, style?, track_changes?, author?
-```
-
-**`insert_paragraphs`** — Insert multiple paragraphs in one operation. Handles index shifting internally.
-```
-file_path, items (array of {text, position, style?}), track_changes?, author?
+file_path, paragraphs (array of {text, position, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
 ```
 
-**`delete_paragraph`** — Delete a paragraph by index.
-```
-file_path, paragraph_index, track_changes?, author?
-```
-
-**`delete_paragraphs`** — Delete multiple paragraphs in one operation. Handles index reordering internally.
+**`delete_paragraphs`** — Delete one or more paragraphs in one operation. Handles index reordering internally.
 ```
 file_path, paragraph_indices, track_changes?, author?
 ```
@@ -234,14 +221,9 @@ file_path, paragraph_indices, track_changes?, author?
 file_path, search, bold?, italic?, underline?, strikethrough?, highlight_color?, font_name?, font_size?, font_color?, case_sensitive?
 ```
 
-**`set_paragraph_format`** — Set alignment, spacing, indentation on a paragraph.
+**`set_paragraph_formats`** — Apply alignment, spacing, indentation to one or more paragraphs in one operation. Each group bundles a list of paragraph indices with the formatting to apply to them.
 ```
-file_path, paragraph_index, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?
-```
-
-**`set_paragraph_formats`** — Apply paragraph formatting to multiple paragraphs in one operation.
-```
-file_path, groups (array of {indices, alignment?, space_before?, ...})
+file_path, groups (array of {indices, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
 ```
 
 **`highlight_text`** — Highlight matching text with a color.
@@ -249,14 +231,9 @@ file_path, groups (array of {indices, alignment?, space_before?, ...})
 file_path, search, color?, case_sensitive?
 ```
 
-**`set_heading`** — Convert a paragraph to a heading (level 1-9).
+**`set_headings`** — Convert one or more paragraphs to headings (level 1-9) in one operation.
 ```
-file_path, paragraph_index, level
-```
-
-**`set_headings`** — Convert multiple paragraphs to headings in one operation.
-```
-file_path, items (array of {paragraph_index, level})
+file_path, headings (array of {paragraph_index, level})
 ```
 
 ### Structure
@@ -340,12 +317,7 @@ file_path
 
 ### Tables
 
-**`edit_table_cell`** — Replace the text in a specific table cell by block, row, and column index.
-```
-file_path, block_index, row_index, col_index, new_text, track_changes?, author?
-```
-
-**`edit_table_cells`** — Replace text in multiple table cells in one operation. Cells can span different tables.
+**`edit_table_cells`** — Replace the text content of one or more table cells in a single open/save cycle. Cells can span different tables.
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
 ```

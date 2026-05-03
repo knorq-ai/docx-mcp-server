@@ -7,10 +7,9 @@ import {
 } from "./helpers.js";
 import {
   formatText,
-  setParagraphFormat,
   setParagraphFormats,
   highlightText,
-  setHeading,
+  setHeadings,
   readDocument,
 } from "../docx-engine.js";
 
@@ -130,10 +129,10 @@ describe("formatText", () => {
 // setParagraphFormat
 // =========================================================================
 
-describe("setParagraphFormat", () => {
+describe("setParagraphFormats (single item)", () => {
   it("sets alignment to center", async () => {
     const p = await createTmpDoc("Center this");
-    await setParagraphFormat(p, 0, { alignment: "center" });
+    await setParagraphFormats(p, [{ indices: [0], format: { alignment: "center" } }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:jc");
     expect(xml).toContain('w:val="center"');
@@ -141,7 +140,7 @@ describe("setParagraphFormat", () => {
 
   it("sets alignment to justify (maps to both)", async () => {
     const p = await createTmpDoc("Justify this");
-    await setParagraphFormat(p, 0, { alignment: "justify" });
+    await setParagraphFormats(p, [{ indices: [0], format: { alignment: "justify" } }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:jc");
     expect(xml).toContain('w:val="both"');
@@ -149,7 +148,7 @@ describe("setParagraphFormat", () => {
 
   it("sets space before and after (points to twips)", async () => {
     const p = await createTmpDoc("Spaced paragraph");
-    await setParagraphFormat(p, 0, { spaceBefore: 12, spaceAfter: 6 });
+    await setParagraphFormats(p, [{ indices: [0], format: { spaceBefore: 12, spaceAfter: 6 } }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:spacing");
     expect(xml).toContain('w:before="240"'); // 12 * 20
@@ -158,7 +157,7 @@ describe("setParagraphFormat", () => {
 
   it("sets line spacing", async () => {
     const p = await createTmpDoc("Line spaced");
-    await setParagraphFormat(p, 0, { lineSpacing: 24 });
+    await setParagraphFormats(p, [{ indices: [0], format: { lineSpacing: 24 } }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:spacing");
     expect(xml).toContain('w:line="480"'); // 24 * 20
@@ -167,7 +166,7 @@ describe("setParagraphFormat", () => {
 
   it("sets left and right indentation", async () => {
     const p = await createTmpDoc("Indented paragraph");
-    await setParagraphFormat(p, 0, { indentLeft: 720, indentRight: 360 });
+    await setParagraphFormats(p, [{ indices: [0], format: { indentLeft: 720, indentRight: 360 } }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:ind");
     expect(xml).toContain('w:left="720"');
@@ -176,7 +175,7 @@ describe("setParagraphFormat", () => {
 
   it("sets first line indent", async () => {
     const p = await createTmpDoc("First line indented");
-    await setParagraphFormat(p, 0, { firstLineIndent: 360 });
+    await setParagraphFormats(p, [{ indices: [0], format: { firstLineIndent: 360 } }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:ind");
     expect(xml).toContain('w:firstLine="360"');
@@ -184,14 +183,14 @@ describe("setParagraphFormat", () => {
 
   it("sets hanging indent", async () => {
     const p = await createTmpDoc("Hanging indent paragraph");
-    await setParagraphFormat(p, 0, { hangingIndent: 720 });
+    await setParagraphFormats(p, [{ indices: [0], format: { hangingIndent: 720 } }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain('w:hanging="720"');
   });
 
   it("throws INDEX_OUT_OF_RANGE for out-of-range index", async () => {
     const p = await createTmpDoc("Only one");
-    await expect(setParagraphFormat(p, 10, { alignment: "center" })).rejects.toMatchObject({
+    await expect(setParagraphFormats(p, [{ indices: [10], format: { alignment: "center" } }])).rejects.toMatchObject({
       code: "INDEX_OUT_OF_RANGE",
     });
   });
@@ -229,10 +228,10 @@ describe("highlightText", () => {
 // setHeading
 // =========================================================================
 
-describe("setHeading", () => {
+describe("setHeadings (single item)", () => {
   it("converts paragraph to Heading 1", async () => {
     const p = await createTmpDoc("Section Title");
-    await setHeading(p, 0, 1);
+    await setHeadings(p, [{ paragraphIndex: 0, level: 1 }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Heading1");
     expect(xml).toContain('w:val="0"'); // outlineLvl = level - 1
@@ -242,7 +241,7 @@ describe("setHeading", () => {
 
   it("converts paragraph to Heading 3", async () => {
     const p = await createTmpDoc("Subsection");
-    await setHeading(p, 0, 3);
+    await setHeadings(p, [{ paragraphIndex: 0, level: 3 }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Heading3");
     expect(xml).toContain('w:val="2"'); // outlineLvl
@@ -250,14 +249,14 @@ describe("setHeading", () => {
 
   it("throws INVALID_PARAMETER for invalid heading level", async () => {
     const p = await createTmpDoc("Text");
-    await expect(setHeading(p, 0, 0)).rejects.toMatchObject({
+    await expect(setHeadings(p, [{ paragraphIndex: 0, level: 0 }])).rejects.toMatchObject({
       code: "INVALID_PARAMETER",
     });
   });
 
   it("throws INDEX_OUT_OF_RANGE for out-of-range paragraph index", async () => {
     const p = await createTmpDoc("Text");
-    await expect(setHeading(p, 99, 1)).rejects.toMatchObject({
+    await expect(setHeadings(p, [{ paragraphIndex: 99, level: 1 }])).rejects.toMatchObject({
       code: "INDEX_OUT_OF_RANGE",
     });
   });
@@ -265,7 +264,7 @@ describe("setHeading", () => {
   it("replaces existing heading style", async () => {
     const p = await createTmpDoc("Text", "Title");
     // Title is H1, change it to H2
-    await setHeading(p, 0, 2);
+    await setHeadings(p, [{ paragraphIndex: 0, level: 2 }]);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("Heading2");
     expect(xml).not.toContain("Heading1");
