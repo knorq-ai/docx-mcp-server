@@ -4,15 +4,19 @@ import {
   cleanupTmpFiles,
   readRawDocXml,
   createDocWithNumberedParagraph,
+  createDocWithHeaderFooter,
 } from "./helpers.js";
 import {
   readDocument,
   editParagraphs,
   insertParagraphs,
+  deleteParagraphs,
   setHeadings,
   editTableCells,
   insertTable,
   acceptAllChanges,
+  rejectAllChanges,
+  replaceTexts,
 } from "../docx-engine.js";
 
 afterEach(cleanupTmpFiles);
@@ -96,6 +100,453 @@ describe("editParagraphs", () => {
     expect(result).toContain("No edits to apply");
     const doc = await readDocument(p);
     expect(doc).toContain("Unchanged");
+  });
+});
+
+// =========================================================================
+// replaceTexts (bulk)
+// =========================================================================
+
+describe("replaceTexts", () => {
+  it("applies multiple replacements in one call", async () => {
+    const p = await createTmpDoc("alpha beta gamma\ndelta alpha epsilon");
+    const result = await replaceTexts(
+      p,
+      [
+        { search: "alpha", replace: "ALPHA" },
+        { search: "delta", replace: "DELTA" },
+      ],
+      false,
+    );
+    const doc = await readDocument(p);
+    expect(doc).toContain("ALPHA");
+    expect(doc).toContain("DELTA");
+    expect(result).toContain("Replaced 3 occurrence(s) across 2 item(s)");
+  });
+
+  it("returns no-op message when nothing matches", async () => {
+    const p = await createTmpDoc("hello world");
+    const result = await replaceTexts(
+      p,
+      [
+        { search: "missing-1", replace: "x" },
+        { search: "missing-2", replace: "y" },
+      ],
+      false,
+    );
+    expect(result).toContain("No occurrences");
+    const doc = await readDocument(p);
+    expect(doc).toContain("hello world");
+  });
+
+  it("handles empty items array without file I/O", async () => {
+    const p = await createTmpDoc("Unchanged");
+    const result = await replaceTexts(p, [], false);
+    expect(result).toContain("No replacements");
+    const doc = await readDocument(p);
+    expect(doc).toContain("Unchanged");
+  });
+
+  it("produces tracked changes with del/ins markup and unique revision IDs", async () => {
+    const p = await createTmpDoc("foo bar baz\nqux foo");
+    await replaceTexts(
+      p,
+      [
+        { search: "foo", replace: "FOO" },
+        { search: "baz", replace: "BAZ" },
+      ],
+      true,
+      "TestBot",
+    );
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:del");
+    expect(xml).toContain("w:ins");
+    expect(xml).toContain("TestBot");
+
+    // Revision IDs across all w:ins/w:del must be unique
+    const idMatches = [...xml.matchAll(/w:(?:ins|del)[^>]*\bw:id="(\d+)"/g)].map((m) => m[1]);
+    expect(idMatches.length).toBeGreaterThan(0);
+    expect(new Set(idMatches).size).toBe(idMatches.length);
+
+    await acceptAllChanges(p);
+    const doc = await readDocument(p);
+    expect(doc).toContain("FOO");
+    expect(doc).toContain("BAZ");
+  });
+
+  it("respects per-item case_sensitive flag", async () => {
+    const p = await createTmpDoc("Hello hello HELLO");
+    await replaceTexts(
+      p,
+      [{ search: "Hello", replace: "X", caseSensitive: true }],
+      false,
+    );
+    const doc = await readDocument(p);
+    // Only the exact-case match is replaced
+    expect(doc).toContain("X hello HELLO");
+  });
+
+  it("rejects an empty search string instead of looping forever", async () => {
+    const p = await createTmpDoc("anything");
+    await expect(
+      replaceTexts(p, [{ search: "", replace: "x" }], false),
+    ).rejects.toThrow(/empty/);
+  });
+
+  it("supports mixed per-item case_sensitive flags", async () => {
+    const p = await createTmpDoc("Hello hello WORLD world");
+    await replaceTexts(
+      p,
+      [
+        { search: "Hello", replace: "X", caseSensitive: true },
+        { search: "world", replace: "Y", caseSensitive: false },
+      ],
+      false,
+    );
+    const doc = await readDocument(p);
+    // Only "Hello" replaced (case-sensitive); both "WORLD" and "world" replaced (case-insensitive)
+    expect(doc).toContain("X hello Y Y");
+  });
+
+  it("refuses tracked edit on a paragraph that already contains tracked markup (PENDING_REVISIONS)", async () => {
+    const p = await createTmpDoc("hello world");
+    // Leave tracked markup in the only paragraph.
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    // Second tracked edit hits the same paragraph (which now has w:ins) — must refuse.
+    await expect(
+      replaceTexts(p, [{ search: "world", replace: "WORLD" }], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("allows tracked edit on a paragraph with no pre-existing revisions even if other paragraphs have them", async () => {
+    const p = await createTmpDoc("alpha line\nbeta line");
+    await replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true);  // marks para 0
+    // Second edit only matches in para 1 (clean) — should succeed.
+    const res = await replaceTexts(p, [{ search: "beta", replace: "BETA" }], true);
+    expect(res).toContain("Replaced 1");
+  });
+
+  it("untracked mode bypasses the pending-revisions guard", async () => {
+    const p = await createTmpDoc("hello world");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    // Untracked mode: free to edit even where revisions exist.
+    const res = await replaceTexts(p, [{ search: "world", replace: "WORLD" }], false);
+    expect(res).toContain("Replaced 1");
+  });
+
+  it("editParagraphs refuses to edit a paragraph that already contains tracked markup", async () => {
+    const p = await createTmpDoc("hello world\nuntouched");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);  // para 0 has w:ins now
+    await expect(
+      editParagraphs(p, [{ paragraphIndex: 0, newText: "anything" }], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("editParagraphs allows editing a clean paragraph even if a sibling has revisions", async () => {
+    const p = await createTmpDoc("hello world\nuntouched");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);  // para 0 has w:ins
+    // Editing para 1 (clean) is fine.
+    await editParagraphs(p, [{ paragraphIndex: 1, newText: "edited" }], true);
+    const doc = await readDocument(p);
+    expect(doc).toContain("edited");
+  });
+
+  it("deleteParagraphs refuses to delete a paragraph with pending revisions in tracked mode", async () => {
+    const p = await createTmpDoc("hello world\nkeep");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    await expect(
+      deleteParagraphs(p, [0], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("deleteParagraphs (untracked) is allowed to hard-delete a paragraph with revisions", async () => {
+    const p = await createTmpDoc("hello world\nkeep");
+    await replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true);
+    // Untracked = hard splice, no nested-markup risk.
+    await deleteParagraphs(p, [0], false);
+    const doc = await readDocument(p);
+    expect(doc).toContain("keep");
+    expect(doc).not.toContain("HELLO");
+  });
+
+  it("refuses tracked edit when a header paragraph has pending revisions and include_headers_footers is true", async () => {
+    const p = await createDocWithHeaderFooter("body alpha", "header alpha", "footer text");
+    // Inject pre-existing tracked insertion in the header.
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    const hfNames = Object.keys(zip.files).filter((n) => /^word\/header\d*\.xml$/.test(n));
+    const headerName = hfNames[0];
+    const headerXml = await zip.file(headerName)!.async("string");
+    const seeded = headerXml.replace(
+      /<w:p>/,
+      `<w:p><w:ins w:id="500" w:author="Prior" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">alpha</w:t></w:r></w:ins>`,
+    );
+    zip.file(headerName, seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    // Tracked replace_texts that matches "alpha" in both body and header.
+    // With include_headers_footers=true the header has pending revisions
+    // on a matching paragraph — must refuse.
+    await expect(
+      replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true, "Claude", true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("paragraphHasRevisions detects pre-existing w:moveTo tracking", async () => {
+    const p = await createTmpDoc("hello there");
+    // Inject a w:moveTo as a sibling of the existing run so the guard
+    // sees a revision marker in the paragraph while the matcher still
+    // finds "hello" in the normal run. Tracked replace_texts must refuse.
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    const docXml = await zip.file("word/document.xml")!.async("string");
+    const seeded = docXml.replace(
+      "</w:p>",
+      `<w:moveTo w:id="700" w:author="Mover" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">moved</w:t></w:r></w:moveTo></w:p>`,
+    );
+    zip.file("word/document.xml", seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    await expect(
+      replaceTexts(p, [{ search: "hello", replace: "HELLO" }], true),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("scanMaxIdAcrossParts handles single-quoted w:id attributes", async () => {
+    // Some external tools emit single-quoted XML attributes. Verify the
+    // regex picks them up so newly minted IDs still strictly increase.
+    const p = await createDocWithHeaderFooter("body alpha", "head", "foot");
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    const headerName = Object.keys(zip.files).find((n) =>
+      /^word\/header\d*\.xml$/.test(n),
+    )!;
+    const xml = await zip.file(headerName)!.async("string");
+    // Pre-seed the header with a single-quoted high w:id.
+    const seeded = xml.replace(
+      /<w:p>/,
+      `<w:p><w:ins w:id='900' w:author='Prior' w:date='2024-01-01T00:00:00Z'><w:r><w:t xml:space='preserve'>existing</w:t></w:r></w:ins>`,
+    );
+    zip.file(headerName, seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    await replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true);
+    const bodyXml = await readRawDocXml(p);
+    const bodyIds = [...bodyXml.matchAll(/w:(?:ins|del)[^>]*\bw:id\s*=\s*["'](\d+)["']/g)]
+      .map((m) => parseInt(m[1], 10));
+    expect(bodyIds.length).toBeGreaterThan(0);
+    for (const id of bodyIds) {
+      expect(id).toBeGreaterThan(900);
+    }
+  });
+
+  it("editTableCells refuses to edit a cell with pending revisions", async () => {
+    const p = await createTmpDoc("Before");
+    await insertTable(p, -1, 1, 1, [["target text"]]);
+    // Make a tracked edit inside the cell.
+    await replaceTexts(p, [{ search: "target", replace: "TARGET" }], true);
+    // Now the cell paragraph has w:ins. Re-editing it must refuse.
+    await expect(
+      editTableCells(
+        p,
+        [{ blockIndex: 1, rowIndex: 0, colIndex: 0, newText: "anything" }],
+        true,
+      ),
+    ).rejects.toMatchObject({ code: "PENDING_REVISIONS" });
+  });
+
+  it("seeds revision IDs from a global scan so body edits do not collide with pre-existing HF revisions", async () => {
+    // Build a doc whose header already has w:ins with a high w:id (200).
+    // Without scanMaxIdAcrossParts, the body's new w:ins would seed from
+    // body's local max (0) + 1 = 1, and as edits accumulate, eventually
+    // collide with 200. With the fix, every new ID must be > 200.
+    const p = await createDocWithHeaderFooter("body alpha", "head", "foot");
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(p));
+    // Inject pre-existing tracked insertion in the header with w:id=200.
+    const hfNames = Object.keys(zip.files).filter((n) =>
+      /^word\/(header|footer)\d*\.xml$/.test(n),
+    );
+    expect(hfNames.length).toBeGreaterThan(0);
+    const headerName = hfNames.find((n) => /header/.test(n))!;
+    const original = await zip.file(headerName)!.async("string");
+    const seeded = original.replace(
+      /<w:p>/,
+      `<w:p><w:ins w:id="200" w:author="Prior" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">existing</w:t></w:r></w:ins>`,
+    );
+    zip.file(headerName, seeded);
+    await fs.writeFile(p, await zip.generateAsync({ type: "nodebuffer" }));
+
+    // Tracked body edit. Pre-fix, this would seed from body's local max (0)
+    // and produce w:id="1", coexisting with pre-existing id 200. That's
+    // not an immediate collision, but a second tracked op would keep
+    // counting from where we left off and eventually hit 200. The fix
+    // seeds from 200+1 so EVERY new ID is > 200.
+    await replaceTexts(p, [{ search: "alpha", replace: "ALPHA" }], true);
+
+    const bodyXml = await readRawDocXml(p);
+    const bodyIds = [...bodyXml.matchAll(/w:(?:ins|del)[^>]*\bw:id="(\d+)"/g)]
+      .map((m) => parseInt(m[1], 10));
+    expect(bodyIds.length).toBeGreaterThan(0);
+    for (const id of bodyIds) {
+      expect(id).toBeGreaterThan(200);
+    }
+  });
+
+  it("replaces inside headers and footers when include_headers_footers is true", async () => {
+    const p = await createDocWithHeaderFooter("body alpha", "header alpha", "footer alpha");
+    await replaceTexts(
+      p,
+      [{ search: "alpha", replace: "ALPHA" }],
+      true,
+      "TestBot",
+      true,
+    );
+
+    const fs = await import("fs/promises");
+    const JSZip = (await import("jszip")).default;
+    const after = await JSZip.loadAsync(await fs.readFile(p));
+    const bodyAfter = await after.file("word/document.xml")!.async("string");
+    // Header/footer file names follow whatever createDocWithHeaderFooter sets up.
+    const hfFiles = Object.keys(after.files).filter((name) =>
+      /^word\/(header|footer)\d*\.xml$/.test(name),
+    );
+    expect(hfFiles.length).toBeGreaterThan(0);
+
+    expect(bodyAfter).toContain("ALPHA");
+    for (const hfFile of hfFiles) {
+      const xml = await after.file(hfFile)!.async("string");
+      expect(xml).toContain("ALPHA");
+    }
+
+    // Cross-part revision IDs should be unique (the body's scanMaxId seed
+    // forwards a running counter into each HF file).
+    const allXml = [bodyAfter, ...(await Promise.all(
+      hfFiles.map((f) => after.file(f)!.async("string")),
+    ))];
+    const allIds = allXml.flatMap((xml) =>
+      [...xml.matchAll(/w:(?:ins|del)[^>]*\bw:id="(\d+)"/g)].map((m) => m[1]),
+    );
+    expect(allIds.length).toBeGreaterThan(0);
+    expect(new Set(allIds).size).toBe(allIds.length);
+  });
+
+  it("applies items sequentially (later items can match earlier replacements)", async () => {
+    const p = await createTmpDoc("alpha");
+    await replaceTexts(
+      p,
+      [
+        { search: "alpha", replace: "beta" },
+        { search: "beta", replace: "gamma" },
+      ],
+      false,
+    );
+    const doc = await readDocument(p);
+    expect(doc).toContain("gamma");
+  });
+
+  it("rejects overlapping items in tracked mode (later search ⊇ earlier replace)", async () => {
+    const p = await createTmpDoc("alpha");
+    // earlier.replace = "beta", later.search = "beta" — exact match
+    await expect(
+      replaceTexts(
+        p,
+        [
+          { search: "alpha", replace: "beta" },
+          { search: "beta", replace: "gamma" },
+        ],
+        true,
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_PARAMETER" });
+  });
+
+  it("allows tracked delete (empty replace) followed by unrelated tracked replace", async () => {
+    const p = await createTmpDoc("obsolete\nfoo bar");
+    // Item 1 deletes "obsolete" (replace=""). Item 2 replaces "foo" with "bar".
+    // Without the empty-replace skip, the bidirectional check would falsely
+    // reject this because needle.includes("") is always true.
+    await replaceTexts(
+      p,
+      [
+        { search: "obsolete", replace: "" },
+        { search: "foo", replace: "FOO" },
+      ],
+      true,
+    );
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("FOO");
+  });
+
+  it("rejects overlapping items in tracked mode (boundary overlap, no full containment)", async () => {
+    const p = await createTmpDoc("abcZ");
+    // earlier.replace = "aXc", later.search = "XcZ".
+    // Neither contains the other, but they share "Xc" at the boundary:
+    // "aXc".endsWith("Xc") and "XcZ".startsWith("Xc"). After tracked
+    // item 1 the doc has w:ins("aXc") followed by "Z" in normal text,
+    // so item 2's "XcZ" search would span the ins boundary — corrupting
+    // reject. The guard refuses upfront.
+    await expect(
+      replaceTexts(
+        p,
+        [
+          { search: "abc", replace: "aXc" },
+          { search: "XcZ", replace: "Y" },
+        ],
+        true,
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_PARAMETER" });
+  });
+
+  it("rejects overlapping items in tracked mode (later search wraps earlier replace)", async () => {
+    const p = await createTmpDoc("ax alpha y");
+    // earlier.replace = "beta", later.search = "x beta y" — wraps the earlier replace.
+    // Without bidirectional check this would slip through.
+    await expect(
+      replaceTexts(
+        p,
+        [
+          { search: "alpha", replace: "beta" },
+          { search: "x beta y", replace: "z" },
+        ],
+        true,
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_PARAMETER" });
+  });
+
+  it("allows the same overlap in untracked mode (no nesting risk)", async () => {
+    const p = await createTmpDoc("alpha");
+    await replaceTexts(
+      p,
+      [
+        { search: "alpha", replace: "beta" },
+        { search: "beta", replace: "gamma" },
+      ],
+      false,
+    );
+    const doc = await readDocument(p);
+    expect(doc).toContain("gamma");
+  });
+
+  it("respects per-item case_sensitive when detecting tracked overlap", async () => {
+    const p = await createTmpDoc("Alpha");
+    // Both items use caseSensitive=true. Item 1 produces "BETA" (uppercase),
+    // item 2 searches for "beta" (lowercase) — case-sensitive comparison
+    // means no overlap, so this should be allowed.
+    await replaceTexts(
+      p,
+      [
+        { search: "Alpha", replace: "BETA", caseSensitive: true },
+        { search: "beta", replace: "gamma", caseSensitive: true },
+      ],
+      true,
+    );
+    // The document should be successfully edited (no throw) and contain BETA.
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("BETA");
   });
 });
 

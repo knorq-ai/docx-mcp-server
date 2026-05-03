@@ -11,19 +11,19 @@
 | カテゴリ | ツール |
 |---------|--------|
 | **読み取り** | `read_document`, `get_document_info`, `search_text`, `list_images` |
-| **編集** | `replace_text`, `edit_paragraph`, `edit_paragraphs`, `insert_paragraph`, `insert_paragraphs`, `delete_paragraph`, `delete_paragraphs` |
-| **書式** | `format_text`, `set_paragraph_format`, `set_paragraph_formats`, `highlight_text`, `set_heading`, `set_headings` |
+| **編集** | `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs` |
+| **書式** | `format_text`, `set_paragraph_formats`, `highlight_text`, `set_headings` |
 | **構造** | `insert_table`, `create_document`, `apply_document_preset` |
 | **レビュー** | `add_comment`, `add_comments`, `read_comments`, `reply_to_comment`, `delete_comment` |
 | **変更履歴** | `accept_all_changes`, `reject_all_changes` |
 | **ページレイアウト** | `get_page_layout`, `set_page_layout` |
 | **ヘッダ/フッタ** | `read_header_footer` |
-| **テーブル** | `edit_table_cell`, `edit_table_cells` |
+| **テーブル** | `edit_table_cells` |
 | **脚注** | `read_footnotes` |
 
 ### 変更履歴 (Track Changes)
 
-編集ツール (`replace_text`, `edit_paragraph`, `insert_paragraph`, `delete_paragraph`) は **変更履歴** に対応している。編集は Word のリビジョン (`w:ins`/`w:del`) として著者名・タイムスタンプ付きで記録され、Word 上で承認・却下ができる。
+編集ツール (`replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs`) は **変更履歴** に対応している。編集は Word のリビジョン (`w:ins`/`w:del`) として著者名・タイムスタンプ付きで記録され、Word 上で承認・却下ができる。
 
 変更履歴は **デフォルトで有効** である。直接編集したい場合は `track_changes: false` を指定する。
 
@@ -149,37 +149,24 @@ file_path
 
 すべての編集ツールは `track_changes` (デフォルト `true`) と `author` (デフォルト `"Claude"`) を受け付ける。
 
-**`replace_text`** — ドキュメント全体でテキストの検索・置換。複数ランにまたがるテキストにも対応。
+**`replace_texts`** — 1 回の open/save サイクルで 1 件以上の検索・置換を適用する。複数ランにまたがるテキストにも対応。
+- `track_changes: false` の場合、items は配列順に逐次適用される（後の item は前の item の置換結果にマッチし得る）。
+- `track_changes: true`（既定）の場合、item N の `search` が以前の item M の `replace` とテキストを共有する（双方向）と engine が拒否する。追跡モードでは重複する item を連鎖させると `w:ins`/`w:del` がネストし、`reject_all_changes` でラウンドトリップできないため。回避策: items を分割して個別に `replace_texts` を呼ぶか、`track_changes: false` + `allow_untracked_edit: true` を使う。
 ```
-file_path, search, replace, case_sensitive?, track_changes?, author?, include_headers_footers?
-```
-
-**`edit_paragraph`** — インデックス指定で段落テキストを置換。
-```
-file_path, paragraph_index, new_text, track_changes?, author?
+file_path, items ({search, replace, case_sensitive?} の配列), track_changes?, author?, include_headers_footers?
 ```
 
-**`edit_paragraphs`** — 複数段落を一括置換。1 回のファイル読み書きで処理。
+**`edit_paragraphs`** — 1 回の open/save サイクルで 1 件以上の段落テキストを置換する。
 ```
 file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
 ```
 
-**`insert_paragraph`** — 指定位置に新しい段落を挿入。
+**`insert_paragraphs`** — 1 回の操作で 1 件以上の段落を挿入する。インデックスシフトを内部で処理。
 ```
-file_path, text, position, style?, track_changes?, author?
-```
-
-**`insert_paragraphs`** — 複数段落を一括挿入。インデックスシフトを内部で処理。
-```
-file_path, items (array of {text, position, style?}), track_changes?, author?
+file_path, paragraphs (array of {text, position, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
 ```
 
-**`delete_paragraph`** — インデックス指定で段落を削除。
-```
-file_path, paragraph_index, track_changes?, author?
-```
-
-**`delete_paragraphs`** — 複数段落を一括削除。インデックス再順序を内部で処理。
+**`delete_paragraphs`** — 1 回の操作で 1 件以上の段落を削除する。インデックス再順序を内部で処理。
 ```
 file_path, paragraph_indices, track_changes?, author?
 ```
@@ -191,14 +178,9 @@ file_path, paragraph_indices, track_changes?, author?
 file_path, search, bold?, italic?, underline?, strikethrough?, highlight_color?, font_name?, font_size?, font_color?, case_sensitive?
 ```
 
-**`set_paragraph_format`** — 段落の配置、間隔、インデントを設定。
+**`set_paragraph_formats`** — 1 回の操作で 1 件以上の段落に配置・間隔・インデントを適用する。各 group は段落インデックスのリストと適用する書式をまとめる。
 ```
-file_path, paragraph_index, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?
-```
-
-**`set_paragraph_formats`** — 複数段落の書式を一括設定。
-```
-file_path, groups (array of {indices, alignment?, space_before?, ...})
+file_path, groups (array of {indices, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
 ```
 
 **`highlight_text`** — マッチするテキストにハイライトカラーを適用。
@@ -206,14 +188,9 @@ file_path, groups (array of {indices, alignment?, space_before?, ...})
 file_path, search, color?, case_sensitive?
 ```
 
-**`set_heading`** — 段落を見出しに変換 (レベル 1-9)。
+**`set_headings`** — 1 件以上の段落を見出しに変換する (レベル 1-9)。
 ```
-file_path, paragraph_index, level
-```
-
-**`set_headings`** — 複数段落を一括で見出しに変換。
-```
-file_path, items (array of {paragraph_index, level})
+file_path, headings (array of {paragraph_index, level})
 ```
 
 ### 構造
@@ -297,12 +274,7 @@ file_path
 
 ### テーブル
 
-**`edit_table_cell`** — ブロック・行・列インデックス指定でテーブルセルのテキストを置換。
-```
-file_path, block_index, row_index, col_index, new_text, track_changes?, author?
-```
-
-**`edit_table_cells`** — 複数テーブルセルを一括編集。異なるテーブルにまたがることも可能。
+**`edit_table_cells`** — 1 回の open/save サイクルで 1 件以上のテーブルセルを置換する。異なるテーブルにまたがることも可能。
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
 ```

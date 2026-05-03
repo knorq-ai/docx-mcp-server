@@ -134,6 +134,49 @@ export function extractTableText(
 // Style / heading detection
 // ---------------------------------------------------------------------------
 
+/**
+ * Detect whether a paragraph already contains tracked-change markup of
+ * any kind that would corrupt a subsequent tracked edit:
+ *   - run-level w:ins / w:del
+ *   - move tracking: w:moveFrom / w:moveTo
+ *   - paragraph-mark revisions under pPr > rPr (w:ins/w:del/w:rPrChange)
+ *   - nested revisions inside inline w:sdt > w:sdtContent
+ *
+ * Tracked editing operations (replace, edit, delete) treat runs inside
+ * existing tracked wrappers as if they were normal text and generate new
+ * w:del/w:ins markers around or inside them, producing nested or
+ * overlapping revision markup that does not round-trip cleanly through
+ * accept/reject. The safe response is to refuse the operation and force
+ * the caller to accept_all_changes or reject_all_changes first.
+ */
+export function paragraphHasRevisions(pChildren: XNode[]): boolean {
+  for (const child of pChildren) {
+    if (child["w:ins"] !== undefined) return true;
+    if (child["w:del"] !== undefined) return true;
+    if (child["w:moveFrom"] !== undefined) return true;
+    if (child["w:moveTo"] !== undefined) return true;
+    // Recurse into inline structured-document-tags (Google Docs export
+    // pattern) — the matcher follows w:sdtContent, so any revision
+    // wrapper in there is exposed to the same corruption.
+    if (child["w:sdt"]) {
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent && paragraphHasRevisions(sdtContent["w:sdtContent"] as XNode[])) {
+        return true;
+      }
+    }
+  }
+  const pPr = findOne(pChildren, "w:pPr");
+  if (pPr) {
+    const rPr = findOne(pPr["w:pPr"] as XNode[], "w:rPr");
+    if (rPr) {
+      for (const child of rPr["w:rPr"] as XNode[]) {
+        if (child["w:ins"] !== undefined || child["w:del"] !== undefined) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function getParagraphStyle(pChildren: XNode[]): string | undefined {
   const pPr = findOne(pChildren, "w:pPr");
   if (!pPr) return undefined;

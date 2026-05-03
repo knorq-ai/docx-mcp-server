@@ -9,9 +9,9 @@ import {
 import {
   readHeaderFooter,
   readFootnotes,
-  editTableCell,
-  editParagraph,
-  replaceText,
+  editTableCells,
+  editParagraphs,
+  replaceTexts,
   readDocument,
   insertTable,
 } from "../docx-engine.js";
@@ -42,10 +42,16 @@ describe("readHeaderFooter", () => {
   });
 });
 
-describe("replaceText with includeHeadersFooters option", () => {
+describe("replaceTexts with includeHeadersFooters option", () => {
   it("replaces text in header when includeHeadersFooters=true", async () => {
     const p = await createDocWithHeaderFooter("Body", "DRAFT Contract", "Page 1");
-    const result = await replaceText(p, "DRAFT", "FINAL", false, false, "Claude", true);
+    const result = await replaceTexts(
+      p,
+      [{ search: "DRAFT", replace: "FINAL" }],
+      false,
+      "Claude",
+      true,
+    );
     expect(result).toContain("1 occurrence");
     const hf = await readHeaderFooter(p);
     expect(hf).toContain("FINAL Contract");
@@ -54,7 +60,7 @@ describe("replaceText with includeHeadersFooters option", () => {
 
   it("does NOT replace in header when includeHeadersFooters=false (default)", async () => {
     const p = await createDocWithHeaderFooter("Body", "DRAFT Header", "Footer");
-    await replaceText(p, "DRAFT", "FINAL", false, false);
+    await replaceTexts(p, [{ search: "DRAFT", replace: "FINAL" }], false);
     const hf = await readHeaderFooter(p);
     expect(hf).toContain("DRAFT Header"); // unchanged
   });
@@ -64,39 +70,39 @@ describe("replaceText with includeHeadersFooters option", () => {
 // Fix 6: editTableCell
 // =========================================================================
 
-describe("editTableCell", () => {
+describe("editTableCells (single item)", () => {
   it("edits a specific cell by row and col index", async () => {
     const p = await createTmpDoc("Before table");
     await insertTable(p, -1, 2, 2, [
       ["A1", "B1"],
       ["A2", "B2"],
     ]);
-    await editTableCell(p, 1, 0, 1, "Updated B1", false);
+    await editTableCells(p, [{ blockIndex: 1, rowIndex: 0, colIndex: 1, newText: "Updated B1" }], false);
     const doc = await readDocument(p);
     expect(doc).toContain("Updated B1");
   });
 
-  it("editTableCell with track changes wraps in del/ins", async () => {
+  it("editTableCells with track changes wraps in del/ins", async () => {
     const p = await createTmpDoc("Paragraph");
     await insertTable(p, -1, 1, 1, [["Original"]]);
-    await editTableCell(p, 1, 0, 0, "Changed", true);
+    await editTableCells(p, [{ blockIndex: 1, rowIndex: 0, colIndex: 0, newText: "Changed" }], true);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:delText");
     expect(xml).toContain("w:ins");
   });
 
-  it("editTableCell tracked changes survive a subsequent editParagraph round-trip", async () => {
+  it("editTableCells tracked changes survive a subsequent editParagraphs round-trip", async () => {
     const p = await createTmpDoc("Paragraph text");
     await insertTable(p, -1, 1, 1, [["Original cell"]]);
     // Step 1: edit table cell with tracked changes
-    await editTableCell(p, 1, 0, 0, "Changed cell", true);
+    await editTableCells(p, [{ blockIndex: 1, rowIndex: 0, colIndex: 0, newText: "Changed cell" }], true);
     // Verify tracked changes are present after step 1
     const xmlAfterTableEdit = await readRawDocXml(p);
     expect(xmlAfterTableEdit).toContain("w:delText");
     expect(xmlAfterTableEdit).toContain("w:ins");
 
     // Step 2: edit paragraph (triggers parse -> serialize round-trip)
-    await editParagraph(p, 0, "Updated paragraph", true);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "Updated paragraph" }], true);
 
     // Verify table cell tracked changes survive the round-trip
     const xmlAfterBothEdits = await readRawDocXml(p);
@@ -112,14 +118,14 @@ describe("editTableCell", () => {
 
   it("throws INDEX_OUT_OF_RANGE for bad block index", async () => {
     const p = await createTmpDoc("Paragraph");
-    await expect(editTableCell(p, 99, 0, 0, "text", false)).rejects.toMatchObject({
+    await expect(editTableCells(p, [{ blockIndex: 99, rowIndex: 0, colIndex: 0, newText: "text" }], false)).rejects.toMatchObject({
       code: "INDEX_OUT_OF_RANGE",
     });
   });
 
   it("throws NOT_A_TABLE error when block is not a table", async () => {
     const p = await createTmpDoc("Just a paragraph");
-    await expect(editTableCell(p, 0, 0, 0, "text", false)).rejects.toMatchObject({
+    await expect(editTableCells(p, [{ blockIndex: 0, rowIndex: 0, colIndex: 0, newText: "text" }], false)).rejects.toMatchObject({
       code: "NOT_A_TABLE",
     });
   });
@@ -127,7 +133,7 @@ describe("editTableCell", () => {
   it("throws INDEX_OUT_OF_RANGE for bad row index", async () => {
     const p = await createTmpDoc("Before");
     await insertTable(p, -1, 2, 2);
-    await expect(editTableCell(p, 1, 99, 0, "text", false)).rejects.toMatchObject({
+    await expect(editTableCells(p, [{ blockIndex: 1, rowIndex: 99, colIndex: 0, newText: "text" }], false)).rejects.toMatchObject({
       code: "INDEX_OUT_OF_RANGE",
     });
   });
@@ -135,7 +141,7 @@ describe("editTableCell", () => {
   it("throws INDEX_OUT_OF_RANGE for bad col index", async () => {
     const p = await createTmpDoc("Before");
     await insertTable(p, -1, 2, 2);
-    await expect(editTableCell(p, 1, 0, 99, "text", false)).rejects.toMatchObject({
+    await expect(editTableCells(p, [{ blockIndex: 1, rowIndex: 0, colIndex: 99, newText: "text" }], false)).rejects.toMatchObject({
       code: "INDEX_OUT_OF_RANGE",
     });
   });

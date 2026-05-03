@@ -10,11 +10,9 @@ import {
   getDocumentInfo,
   searchText,
   createDocument,
-  insertParagraph,
-  replaceText,
+  replaceTexts,
   insertTable,
   addComment,
-  setHeading,
   listImages,
   listImagesStructured,
 } from "../docx-engine.js";
@@ -67,7 +65,7 @@ describe("readDocument", () => {
 
   it("shows default (accepted) view — skips deleted text", async () => {
     const p = await createTmpDoc("Hello old world");
-    await replaceText(p, "old", "new", false, true);
+    await replaceTexts(p, [{ search: "old", replace: "new" }], true);
     const result = await readDocument(p, undefined, undefined, false);
     expect(result).toContain("new");
     expect(result).not.toContain("[-old-]");
@@ -75,7 +73,7 @@ describe("readDocument", () => {
 
   it("shows revisions view with [-deleted-] and [+inserted+]", async () => {
     const p = await createTmpDoc("Hello old world");
-    await replaceText(p, "old", "new", false, true);
+    await replaceTexts(p, [{ search: "old", replace: "new" }], true);
     const result = await readDocument(p, undefined, undefined, true);
     expect(result).toContain("[-old-]");
     expect(result).toContain("[+new+]");
