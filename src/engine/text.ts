@@ -493,6 +493,27 @@ export function makeTextRun(text: string, rPr: XNode | null): XNode {
   return el("w:r", runC);
 }
 
+/**
+ * Create one or more w:r elements from text, converting embedded "\n" into
+ * w:br soft line breaks. Returns a single run when the text has no newline.
+ * Used where a paragraph split is not possible (tracked inserted runs), so
+ * that multi-line input renders as line breaks instead of a literal "\n".
+ */
+export function makeTextRuns(text: string, rPr: XNode | null): XNode[] {
+  const lines = text.split("\n");
+  const runs: XNode[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) {
+      const brChildren: XNode[] = [];
+      if (rPr) brChildren.push(cloneNode(rPr));
+      brChildren.push(el("w:br"));
+      runs.push(el("w:r", brChildren));
+    }
+    if (lines[i]) runs.push(makeTextRun(lines[i], rPr));
+  }
+  return runs;
+}
+
 /** Create a w:r with w:delText (for use inside w:del) */
 export function makeDelTextRun(text: string, rPr: XNode | null): XNode {
   const runC: XNode[] = [];
@@ -501,6 +522,27 @@ export function makeDelTextRun(text: string, rPr: XNode | null): XNode {
     el("w:delText", [textNode(text)], { "xml:space": "preserve" }),
   );
   return el("w:r", runC);
+}
+
+/**
+ * Like makeTextRuns but for deleted text: builds w:delText runs (for use inside
+ * w:del), converting embedded "\n" into w:br soft-break runs so that deleting
+ * text that already contains soft breaks does not leave a literal "\n" behind
+ * when the deletion is rejected (reject turns w:delText back into w:t).
+ */
+export function makeDelTextRuns(text: string, rPr: XNode | null): XNode[] {
+  const lines = text.split("\n");
+  const runs: XNode[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) {
+      const brChildren: XNode[] = [];
+      if (rPr) brChildren.push(cloneNode(rPr));
+      brChildren.push(el("w:br"));
+      runs.push(el("w:r", brChildren));
+    }
+    if (lines[i]) runs.push(makeDelTextRun(lines[i], rPr));
+  }
+  return runs;
 }
 
 /** Wrap runs in a w:del revision element */

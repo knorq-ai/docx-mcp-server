@@ -156,12 +156,12 @@ file_path
 file_path, items ({search, replace, case_sensitive?} の配列), track_changes?, author?, include_headers_footers?
 ```
 
-**`edit_paragraphs`** — 1 回の open/save サイクルで 1 件以上の段落テキストを置換する。
+**`edit_paragraphs`** — 1 回の open/save サイクルで 1 件以上の段落テキストを置換する。`new_text` 中の `\n` は段落区切りとして扱う。変更履歴オフの編集は行ごとに別段落へ分割し（各段落は元の番号付け・インデントを継承）、変更履歴オンの編集は 1 段落のまま `\n` を改行（ソフトブレーク）として描画する。
 ```
 file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
 ```
 
-**`insert_paragraphs`** — 1 回の操作で 1 件以上の段落を挿入する。インデックスシフトを内部で処理。
+**`insert_paragraphs`** — 1 回の操作で 1 件以上の段落を挿入する。インデックスシフトを内部で処理。`text` 中の `\n` は段落区切りとして扱う（変更履歴オフ: 行ごとに別段落、変更履歴オン: ソフトブレーク）。同一 `position` に複数段落を指定した場合、ドキュメント上では配列と逆順に並ぶため、逆順に並べるか個別呼び出しにする。
 ```
 file_path, paragraphs (array of {text, position, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
 ```
@@ -274,7 +274,7 @@ file_path
 
 ### テーブル
 
-**`edit_table_cells`** — 1 回の open/save サイクルで 1 件以上のテーブルセルを置換する。異なるテーブルにまたがることも可能。
+**`edit_table_cells`** — 1 回の open/save サイクルで 1 件以上のテーブルセルを置換する。異なるテーブルにまたがることも可能。`new_text` 中の `\n` は段落区切りとして扱う。変更履歴オフの編集は**セル全体**を置換し、各行を個別の段落にする（再編集しても古い行が残らない）。変更履歴オンの編集はセル先頭段落を差分置換し、`\n` をソフトブレークとして描画する。
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
 ```

@@ -64,7 +64,9 @@ import {
   allocRevId,
   getRunRPr,
   makeTextRun,
+  makeTextRuns,
   makeDelTextRun,
+  makeDelTextRuns,
   wrapInDel,
   wrapInIns,
   computeMinimalDiff,
@@ -680,10 +682,15 @@ function replaceParagraphText(
     const newChildren: XNode[] = [];
     if (pPr) newChildren.push(pPr);
     newChildren.push(...structuralElements);
-    if (diff.prefix) newChildren.push(makeTextRun(diff.prefix, firstRPr));
-    if (diff.oldMiddle) newChildren.push(wrapInDel([makeDelTextRun(diff.oldMiddle, firstRPr)], ctx));
-    if (diff.newMiddle) newChildren.push(wrapInIns([makeTextRun(diff.newMiddle, firstRPr)], ctx));
-    if (diff.suffix) newChildren.push(makeTextRun(diff.suffix, firstRPr));
+    // Newlines in the inserted text become soft breaks (w:br) inside the
+    // tracked run. Tracked mode keeps a single paragraph because inserting a
+    // paragraph mark as a tracked change does not round-trip cleanly through
+    // accept/reject in this engine. Untracked edits split into real paragraphs
+    // (see replaceParagraphTextMultiline).
+    if (diff.prefix) newChildren.push(...makeTextRuns(diff.prefix, firstRPr));
+    if (diff.oldMiddle) newChildren.push(wrapInDel(makeDelTextRuns(diff.oldMiddle, firstRPr), ctx));
+    if (diff.newMiddle) newChildren.push(wrapInIns(makeTextRuns(diff.newMiddle, firstRPr), ctx));
+    if (diff.suffix) newChildren.push(...makeTextRuns(diff.suffix, firstRPr));
     element["w:p"] = newChildren;
   } else {
     const newRun = el("w:r", [
@@ -695,6 +702,141 @@ function replaceParagraphText(
     newChildren.push(newRun);
     element["w:p"] = newChildren;
   }
+}
+
+/**
+ * Collect the inline structural elements (bookmarks, comment range/reference
+ * markers, drawing-bearing runs) of a paragraph that must survive a text
+ * replacement. Mirrors the preservation logic in replaceParagraphText.
+ */
+function collectStructuralElements(pChildren: XNode[]): XNode[] {
+  const out: XNode[] = [];
+  for (const child of pChildren) {
+    if (
+      child["w:bookmarkStart"] !== undefined ||
+      child["w:bookmarkEnd"] !== undefined ||
+      child["w:commentRangeStart"] !== undefined ||
+      child["w:commentRangeEnd"] !== undefined ||
+      child["w:commentReference"] !== undefined
+    ) {
+      out.push(child);
+    } else if (child["w:r"]) {
+      const runC = child["w:r"] as XNode[];
+      if (runC.some((rc) => rc["w:drawing"] !== undefined)) out.push(child);
+    }
+  }
+  return out;
+}
+
+/** Return the rPr of the first non-drawing run in a paragraph, cloned. */
+function firstRunRPr(pChildren: XNode[]): XNode | null {
+  for (const child of pChildren) {
+    if (child["w:r"]) {
+      const runC = child["w:r"] as XNode[];
+      if (runC.some((rc) => rc["w:drawing"] !== undefined)) continue;
+      const rPr = getRunRPr(runC);
+      if (rPr) return rPr;
+    }
+  }
+  return null;
+}
+
+/**
+ * Replace a paragraph's text, treating "\n" as a paragraph break.
+ *
+ *  - Untracked: split into multiple sibling <w:p>, each sharing the source
+ *    pPr (deep-cloned for lines 2..N) and the first run's rPr, so list
+ *    numbering, hanging indents and alignment apply to every line — matching
+ *    what a human types pressing Enter. Empty lines become empty paragraphs.
+ *  - Tracked, or text without "\n": delegate to replaceParagraphText, which
+ *    keeps a single paragraph and (in tracked mode) renders "\n" as a soft
+ *    break. Tracked paragraph-mark insertion is avoided because it does not
+ *    round-trip cleanly through accept/reject.
+ *
+ * `parent` is the array holding `element` (document body or a table cell's
+ * children); on a multi-paragraph split it is spliced in place.
+ */
+function replaceParagraphTextMultiline(
+  parent: XNode[],
+  element: XNode,
+  newText: string,
+  ctx: RevisionContext | null,
+): void {
+  if (ctx || !newText.includes("\n")) {
+    replaceParagraphText(element, newText, ctx);
+    return;
+  }
+
+  const idx = parent.indexOf(element);
+  if (idx === -1) {
+    // Element is not where we expect — fall back to in-place replacement.
+    replaceParagraphText(element, newText, ctx);
+    return;
+  }
+
+  const pChildren = element["w:p"] as XNode[];
+  const pPr = findOne(pChildren, "w:pPr");
+  const firstRPr = firstRunRPr(pChildren);
+  const structuralElements = collectStructuralElements(pChildren);
+
+  const lines = newText.split("\n");
+  const newParas: XNode[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const kids: XNode[] = [];
+    if (pPr) kids.push(i === 0 ? pPr : cloneNode(pPr));
+    if (i === 0) kids.push(...structuralElements);
+    if (lines[i]) kids.push(makeTextRun(lines[i], firstRPr));
+    newParas.push(el("w:p", kids));
+  }
+
+  parent.splice(idx, 1, ...newParas);
+}
+
+/**
+ * Replace ALL block-level paragraphs of a table cell with paragraphs built from
+ * newText (split on "\n" so each line is its own <w:p>). The new paragraphs
+ * inherit the cell's first paragraph's pPr (deep-cloned for lines 2..N) and its
+ * first run's rPr, and the first line keeps any inline structural elements
+ * (bookmarks, comment markers, drawings). Non-paragraph children (w:tcPr, a
+ * nested w:tbl) are preserved in place.
+ *
+ * This makes an untracked cell edit a full replacement rather than a first-
+ * paragraph-only edit, so re-editing a cell that already holds several
+ * paragraphs (e.g. a numbered list produced by an earlier split) does not leave
+ * stale lines behind. A cell always keeps at least one paragraph (an empty
+ * newText yields a single empty <w:p>), as OOXML requires.
+ */
+function replaceCellContentUntracked(cellChildren: XNode[], newText: string): void {
+  const firstPara = cellChildren.find((c: XNode) => c["w:p"]);
+  const firstPChildren = firstPara ? (firstPara["w:p"] as XNode[]) : null;
+  const pPr = firstPChildren ? findOne(firstPChildren, "w:pPr") : null;
+  const firstRPr = firstPChildren ? firstRunRPr(firstPChildren) : null;
+  const structuralElements = firstPChildren ? collectStructuralElements(firstPChildren) : [];
+
+  const lines = newText.split("\n");
+  const newParas: XNode[] = lines.map((line, i) => {
+    const kids: XNode[] = [];
+    if (pPr) kids.push(i === 0 ? pPr : cloneNode(pPr));
+    if (i === 0) kids.push(...structuralElements);
+    if (line) kids.push(makeTextRun(line, firstRPr));
+    return el("w:p", kids);
+  });
+
+  const newChildren: XNode[] = [];
+  let inserted = false;
+  for (const child of cellChildren) {
+    if (child["w:p"]) {
+      if (!inserted) {
+        newChildren.push(...newParas);
+        inserted = true;
+      }
+    } else {
+      newChildren.push(child);
+    }
+  }
+  if (!inserted) newChildren.push(...newParas);
+  cellChildren.length = 0;
+  cellChildren.push(...newChildren);
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +864,10 @@ export async function editParagraphs(
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
 
-    // Validate all indices upfront
+    // Validate all indices upfront and capture element references. References
+    // (not indices) are held because an untracked multi-line edit splices new
+    // sibling paragraphs into the body, shifting the indices of later targets.
+    const targets: XNode[] = [];
     for (const edit of edits) {
       if (edit.paragraphIndex < 0 || edit.paragraphIndex >= bodyIdxs.length) {
         throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${edit.paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
@@ -734,14 +879,24 @@ export async function editParagraphs(
       if (trackChanges && paragraphHasRevisions(element["w:p"] as XNode[])) {
         throwPendingRevisions(`Paragraph at index ${edit.paragraphIndex}`);
       }
+      targets.push(element);
     }
 
     const ctx = trackChanges
       ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
       : null;
 
-    for (const edit of edits) {
-      replaceParagraphText(body[bodyIdxs[edit.paragraphIndex]], edit.newText, ctx);
+    // Collapse duplicate edits to the same paragraph (last-write-wins). An
+    // untracked multi-line edit splices the original element out of the body,
+    // so a second edit holding the same now-detached reference would be lost;
+    // applying once with the final text preserves the previous in-place
+    // last-write-wins behaviour and avoids mutating a detached node.
+    const finalText = new Map<XNode, string>();
+    for (let i = 0; i < edits.length; i++) {
+      finalText.set(targets[i], edits[i].newText);
+    }
+    for (const [element, newText] of finalText) {
+      replaceParagraphTextMultiline(body, element, newText, ctx);
     }
 
     serializeDocXml(handle, parsed);
@@ -764,13 +919,37 @@ interface BuildParagraphOptions {
   sourcePPr?: XNode;
 }
 
-/** Build a w:p element with optional style, numbering, copied format, and tracked insertion context. */
+/**
+ * Build one or more w:p elements with optional style, numbering, copied format,
+ * and tracked insertion context.
+ *
+ * Untracked multi-line input becomes one real paragraph per line, each with its
+ * own pPr (so numbering / hanging indents apply to every line — matching the
+ * edit semantics in replaceParagraphTextMultiline). Tracked mode, and single-
+ * line input, produce a single paragraph; under tracking "\n" renders as a soft
+ * break because tracked paragraph-mark insertion does not round-trip cleanly
+ * through accept/reject.
+ */
 function buildNewParagraph(
   text: string,
   style: string | undefined,
   ctx: RevisionContext | null,
   opts?: BuildParagraphOptions,
-): XNode {
+): XNode[] {
+  if (!ctx && text.includes("\n")) {
+    return text.split("\n").map((line) => {
+      const pChildren: XNode[] = [];
+      const pPr = buildPPrForNewParagraph(style, ctx, opts);
+      if (pPr) pChildren.push(pPr);
+      if (line) {
+        pChildren.push(
+          el("w:r", [el("w:t", [textNode(line)], { "xml:space": "preserve" })]),
+        );
+      }
+      return el("w:p", pChildren);
+    });
+  }
+
   const pChildren: XNode[] = [];
 
   // Build the pPr element
@@ -792,20 +971,13 @@ function buildNewParagraph(
       }
     }
     pChildren.push(wrapInIns(insRuns, ctx));
-  } else {
-    for (let i = 0; i < lines.length; i++) {
-      if (i > 0) pChildren.push(el("w:r", [el("w:br")]));
-      if (lines[i]) {
-        pChildren.push(
-          el("w:r", [
-            el("w:t", [textNode(lines[i])], { "xml:space": "preserve" }),
-          ]),
-        );
-      }
-    }
+  } else if (text) {
+    pChildren.push(
+      el("w:r", [el("w:t", [textNode(text)], { "xml:space": "preserve" })]),
+    );
   }
 
-  return el("w:p", pChildren);
+  return [el("w:p", pChildren)];
 }
 
 /**
@@ -887,22 +1059,22 @@ function buildPPrForNewParagraph(
   return el("w:pPr", pPrChildren);
 }
 
-/** Insert a paragraph element into body at the given position, handling sectPr and append. */
+/** Insert paragraph element(s) into body at the given position, handling sectPr and append. */
 function spliceNewParagraph(
   body: XNode[],
   bodyIdxs: number[],
   position: number,
-  newPara: XNode,
+  newParas: XNode[],
 ): void {
   if (position < 0 || position >= bodyIdxs.length) {
     const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
     if (sectPrIdx !== -1) {
-      body.splice(sectPrIdx, 0, newPara);
+      body.splice(sectPrIdx, 0, ...newParas);
     } else {
-      body.push(newPara);
+      body.push(...newParas);
     }
   } else {
-    body.splice(bodyIdxs[position], 0, newPara);
+    body.splice(bodyIdxs[position], 0, ...newParas);
   }
 }
 
@@ -992,10 +1164,10 @@ export async function insertParagraphs(
     }
 
     for (const item of sorted) {
-      const newPara = buildNewParagraph(item.text, item.style, ctx, resolvedOpts.get(item));
+      const newParas = buildNewParagraph(item.text, item.style, ctx, resolvedOpts.get(item));
       // Recalculate indices after each splice to avoid stale mapping
       const currentBodyIdxs = blockBodyIndices(body);
-      spliceNewParagraph(body, currentBodyIdxs, item.position, newPara);
+      spliceNewParagraph(body, currentBodyIdxs, item.position, newParas);
     }
 
     serializeDocXml(handle, parsed);
@@ -2522,27 +2694,22 @@ export async function readHeaderFooter(filePath: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helper: replace cell text content in-place
+// Shared helper: navigate to a table cell
 // ---------------------------------------------------------------------------
 
-/** Replace the text content of a cell's first paragraph, preserving pPr and structural elements. */
-function replaceCellText(
-  paraEl: XNode,
-  newText: string,
-  ctx: RevisionContext | null,
-): void {
-  // Delegate to replaceParagraphText which handles structural element preservation
-  replaceParagraphText(paraEl, newText, ctx);
-}
-
-/** Navigate to a specific cell in a table block and return its first paragraph element. */
+/**
+ * Navigate to a specific cell in a table block and return its first paragraph
+ * element together with the cell's children array (the paragraph's parent),
+ * which an untracked multi-line replacement needs in order to splice in
+ * additional sibling paragraphs.
+ */
 function getTableCellParagraph(
   body: XNode[],
   bodyIdxs: number[],
   blockIndex: number,
   rowIndex: number,
   colIndex: number,
-): XNode {
+): { paraEl: XNode; cellChildren: XNode[] } {
   if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
   }
@@ -2574,7 +2741,7 @@ function getTableCellParagraph(
     throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Cell [${rowIndex},${colIndex}] has no paragraph.`);
   }
 
-  return paraEl;
+  return { paraEl, cellChildren };
 }
 
 // ---------------------------------------------------------------------------
@@ -2605,10 +2772,10 @@ export async function editTableCells(
     const bodyIdxs = blockBodyIndices(body);
 
     // Validate all cells upfront and collect paragraph references
-    const targets: { paraEl: XNode; newText: string; edit: EditTableCellItem }[] = [];
+    const targets: { paraEl: XNode; cellChildren: XNode[]; newText: string; edit: EditTableCellItem }[] = [];
     for (const edit of edits) {
-      const paraEl = getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
-      targets.push({ paraEl, newText: edit.newText, edit });
+      const { paraEl, cellChildren } = getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
+      targets.push({ paraEl, cellChildren, newText: edit.newText, edit });
     }
 
     if (trackChanges) {
@@ -2623,8 +2790,16 @@ export async function editTableCells(
       ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
       : null;
 
-    for (const { paraEl, newText } of targets) {
-      replaceCellText(paraEl, newText, ctx);
+    for (const { paraEl, cellChildren, newText } of targets) {
+      if (ctx) {
+        // Tracked: diff-replace the first paragraph in place (del old + ins new,
+        // "\n" → soft break). Tracked paragraph-mark insertion is avoided.
+        replaceParagraphText(paraEl, newText, ctx);
+      } else {
+        // Untracked: replace the entire cell so multi-line input lands as real
+        // paragraphs and re-edits leave no residue.
+        replaceCellContentUntracked(cellChildren, newText);
+      }
     }
 
     serializeDocXml(handle, parsed);

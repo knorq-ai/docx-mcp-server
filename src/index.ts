@@ -272,7 +272,7 @@ server.tool(
 
 server.tool(
   "edit_paragraphs",
-  "Replace the text content of multiple paragraphs in one operation. Opens and saves the file only once. Paragraph indices remain stable because edits don't change paragraph count.",
+  "Replace the text content of multiple paragraphs in one operation. Opens and saves the file only once. A '\\n' in new_text is a paragraph break: untracked edits split the line into separate paragraphs (each inheriting the original numbering / indentation), which increases the block count and shifts the indices of later blocks; tracked edits keep one paragraph and render '\\n' as a soft line break.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     edits: z
@@ -281,7 +281,11 @@ server.tool(
           paragraph_index: z
             .number()
             .describe("Index of the paragraph to edit"),
-          new_text: z.string().describe("New text content for the paragraph"),
+          new_text: z
+            .string()
+            .describe(
+              "New text content for the paragraph. '\\n' is treated as a paragraph break (see tool description).",
+            ),
         }),
       )
       .describe("Array of paragraph edits"),
@@ -334,13 +338,17 @@ server.tool(
 
 server.tool(
   "insert_paragraphs",
-  "Insert multiple paragraphs in one operation. Handles index shifting internally by processing in reverse order. Opens and saves the file only once. Supports numbering (num_id/num_level) and format copying (copy_format_from).",
+  "Insert multiple paragraphs in one operation. Handles index shifting internally by processing in reverse order. Opens and saves the file only once. Supports numbering (num_id/num_level) and format copying (copy_format_from). A '\\n' in text is a paragraph break: untracked inserts create one paragraph per line (each carrying the chosen style/numbering); tracked inserts keep one paragraph and render '\\n' as a soft line break. Note: when several paragraphs share the same position, they appear in the document in the reverse of array order — list them back-to-front, or use separate calls.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     paragraphs: z
       .array(
         z.object({
-          text: z.string().describe("Text content of the new paragraph"),
+          text: z
+            .string()
+            .describe(
+              "Text content of the new paragraph. '\\n' is treated as a paragraph break (see tool description).",
+            ),
           position: z
             .number()
             .describe("Block index to insert before (-1 for end of document)"),
@@ -1115,7 +1123,7 @@ server.tool(
 
 server.tool(
   "edit_table_cells",
-  "Replace the text content of multiple table cells in one operation. Cells can span different tables. Opens and saves the file only once.",
+  "Replace the text content of multiple table cells in one operation. Cells can span different tables. Opens and saves the file only once. A '\\n' in new_text is a paragraph break. Untracked edits replace the WHOLE cell, turning each line into its own paragraph (inheriting the cell's first-paragraph formatting), so re-editing leaves no stale lines. Tracked edits diff-replace the cell's first paragraph and render '\\n' as a soft line break.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     edits: z
@@ -1126,7 +1134,11 @@ server.tool(
             .describe("Index of the table block"),
           row_index: z.number().describe("Zero-based row index"),
           col_index: z.number().describe("Zero-based column index"),
-          new_text: z.string().describe("New text content for the cell"),
+          new_text: z
+            .string()
+            .describe(
+              "New text content for the cell. '\\n' is treated as a paragraph break (see tool description).",
+            ),
         }),
       )
       .describe("Array of cell edits"),

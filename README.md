@@ -199,12 +199,12 @@ All editing tools accept `track_changes` (default `true`) and `author` (default 
 file_path, items (array of {search, replace, case_sensitive?}), track_changes?, author?, include_headers_footers?
 ```
 
-**`edit_paragraphs`** — Replace the text content of one or more paragraphs in a single open/save cycle.
+**`edit_paragraphs`** — Replace the text content of one or more paragraphs in a single open/save cycle. A `\n` in `new_text` is a paragraph break: untracked edits split it into separate paragraphs (each inheriting the original numbering/indentation), tracked edits keep one paragraph and render `\n` as a soft line break.
 ```
 file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
 ```
 
-**`insert_paragraphs`** — Insert one or more paragraphs in one operation. Handles index shifting internally.
+**`insert_paragraphs`** — Insert one or more paragraphs in one operation. Handles index shifting internally. A `\n` in `text` is a paragraph break (untracked: one paragraph per line; tracked: soft line break). When several paragraphs share the same `position`, they land in the document in the reverse of array order — list them back-to-front or use separate calls.
 ```
 file_path, paragraphs (array of {text, position, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
 ```
@@ -317,7 +317,7 @@ file_path
 
 ### Tables
 
-**`edit_table_cells`** — Replace the text content of one or more table cells in a single open/save cycle. Cells can span different tables.
+**`edit_table_cells`** — Replace the text content of one or more table cells in a single open/save cycle. Cells can span different tables. A `\n` in `new_text` is a paragraph break: untracked edits replace the **whole cell**, turning each line into its own paragraph (so re-editing leaves no stale lines); tracked edits diff-replace the cell's first paragraph and render `\n` as a soft line break.
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
 ```

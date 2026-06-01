@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] — 2026-06-01
+
+### Fixed
+- `edit_paragraphs` and `edit_table_cells` no longer write a literal `\n` into a single `<w:t>` run (which Word rendered as one continuous wrapped line). A `\n` in `new_text` is now treated as a paragraph break.
+
+### Changed
+- Newline (`\n`) semantics for editing/insertion tools are now explicit and uniform:
+  - **Untracked** edits/inserts split on `\n` into separate `<w:p>` paragraphs. Each paragraph inherits the source paragraph's `pPr` (numbering, hanging indent, alignment) and first-run `rPr`, so manual numbered lists and multi-line cells render correctly instead of inheriting the hanging indent only on the first line. Affects `edit_paragraphs`, `edit_table_cells`, `insert_paragraphs`.
+  - **Tracked** edits/inserts keep a single paragraph and render `\n` as a soft line break (`<w:br/>`) inside the inserted run, because inserting a paragraph mark as a tracked change does not round-trip cleanly through `accept_all_changes` / `reject_all_changes`.
+- `edit_table_cells` (untracked) now replaces the **entire cell** rather than only its first paragraph. Re-editing a multi-paragraph cell (e.g. a numbered list produced by an earlier split) no longer leaves stale lines behind. `w:tcPr` and nested tables are preserved. Tracked-mode cell edits are unchanged (first-paragraph diff replace).
+  - Note: because an untracked multi-line `edit_paragraphs` increases the paragraph count, the indices of later blocks shift — re-read or use `search_text` to re-locate targets after such an edit.
+
 ## [3.1.0] — 2026-05-03
 
 ### Added
