@@ -4,7 +4,7 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**36 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**39 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
@@ -18,7 +18,7 @@ A local [MCP](https://modelcontextprotocol.io/) server for reading and editing W
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
 | **Headers/footers** | `read_header_footer` |
-| **Tables** | `read_table_structure`, `read_table_cell`, `edit_table_cells` |
+| **Tables** | `read_table_structure`, `read_table_cell`, `edit_table_cells`, `edit_table_paragraphs`, `delete_table_paragraphs`, `insert_table_paragraphs` |
 | **Footnotes** | `read_footnotes` |
 
 ### Track changes
@@ -337,6 +337,21 @@ file_path, block_index, row_index, col_index
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
 ```
 
+**`edit_table_paragraphs`** — Edit one specific paragraph inside a cell (cell-local `paragraph_index`) without replacing the whole cell. For surgically changing a single line of a multi-paragraph cell (e.g. one numbered-list item).
+```
+file_path, edits (array of {block_index, row_index, col_index, paragraph_index, new_text}), track_changes?, author?
+```
+
+**`delete_table_paragraphs`** — Delete one specific paragraph inside a cell. Keeps a blank paragraph if the deleted one was the cell's last (so the cell stays valid); real Word numbering renumbers the rest automatically.
+```
+file_path, targets (array of {block_index, row_index, col_index, paragraph_index}), track_changes?, author?
+```
+
+**`insert_table_paragraphs`** — Insert a paragraph inside a cell at a cell-local position (`-1`/out-of-range appends). Supports `num_id`/`num_level` and `copy_format_from` (a paragraph index within the same cell).
+```
+file_path, inserts (array of {block_index, row_index, col_index, position, text, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
+```
+
 ### Footnotes
 
 **`read_footnotes`** — Read all footnotes with their IDs and text content.
@@ -371,7 +386,7 @@ The savings are especially large for **tracked changes**, **comments**, and **ru
 
 Simple read and paragraph-format operations see smaller savings (~63–76%) since python-docx has clean APIs for these.
 
-Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 36 tools) pays for itself in 3–5 operations.
+Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 39 tools) pays for itself in 3–5 operations.
 
 ## Requirements
 

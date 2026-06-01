@@ -1438,13 +1438,24 @@ function buildPPrForNewParagraph(
     const pPr = cloneNode(opts.sourcePPr);
     const pPrChildren = pPr["w:pPr"] as XNode[];
 
+    // Strip stale tracked-change metadata that belongs to the SOURCE paragraph,
+    // not the new one. A leftover w:pPrChange / w:rPrChange would otherwise be
+    // read by accept/reject as a live revision on the freshly inserted node.
+    for (let i = pPrChildren.length - 1; i >= 0; i--) {
+      if (pPrChildren[i]["w:pPrChange"] !== undefined) pPrChildren.splice(i, 1);
+    }
+
     // Always strip stale revision markers from the cloned rPr —
     // they belong to the source paragraph, not the new one.
     const existingRPr = findOne(pPrChildren, "w:rPr");
     if (existingRPr) {
       const rPrChildren = existingRPr["w:rPr"] as XNode[];
       for (let i = rPrChildren.length - 1; i >= 0; i--) {
-        if (rPrChildren[i]["w:ins"] !== undefined || rPrChildren[i]["w:del"] !== undefined) {
+        if (
+          rPrChildren[i]["w:ins"] !== undefined ||
+          rPrChildren[i]["w:del"] !== undefined ||
+          rPrChildren[i]["w:rPrChange"] !== undefined
+        ) {
           rPrChildren.splice(i, 1);
         }
       }
@@ -3250,6 +3261,283 @@ export async function editTableCells(
 
     const mode = trackChanges ? " (tracked)" : "";
     return `Updated ${edits.length} table cell(s) in ${path.basename(filePath)}${mode}.`;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 22b. Per-paragraph table cell editing (edit / delete / insert)
+//
+// These address an individual <w:p> inside a <w:tc> by a cell-local paragraph
+// index (counting only the cell's w:p children, 0-based). Row/column indices
+// are physical w:tc positions — the same convention edit_table_cells uses; a
+// horizontally (gridSpan) or vertically (vMerge) merged cell is one physical
+// position. Use read_table_cell to see a cell's paragraph indices.
+// ---------------------------------------------------------------------------
+
+/** Resolve a cell to its <w:tc> children array, validating every index. */
+function getCellChildren(
+  body: XNode[],
+  bodyIdxs: number[],
+  blockIndex: number,
+  rowIndex: number,
+  colIndex: number,
+): XNode[] {
+  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
+  }
+  const element = body[bodyIdxs[blockIndex]];
+  if (!element["w:tbl"]) {
+    throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
+  }
+  const rows = findAll(element["w:tbl"] as XNode[], "w:tr");
+  if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= rows.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
+  }
+  const cells = findAll(rows[rowIndex]["w:tr"] as XNode[], "w:tc");
+  if (!Number.isInteger(colIndex) || colIndex < 0 || colIndex >= cells.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${colIndex} out of range (0–${cells.length - 1}).`);
+  }
+  return cells[colIndex]["w:tc"] as XNode[];
+}
+
+/** Resolve a cell's w:p element by cell-local paragraph index. */
+function getCellParagraph(cellChildren: XNode[], paragraphIndex: number, where: string): XNode {
+  const paras = findAll(cellChildren, "w:p");
+  if (!Number.isInteger(paragraphIndex) || paragraphIndex < 0 || paragraphIndex >= paras.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${paras.length - 1}) in ${where}.`);
+  }
+  return paras[paragraphIndex];
+}
+
+export interface EditTableParagraphItem {
+  blockIndex: number;
+  rowIndex: number;
+  colIndex: number;
+  paragraphIndex: number;
+  newText: string;
+}
+
+export async function editTableParagraphs(
+  filePath: string,
+  edits: EditTableParagraphItem[],
+  trackChanges: boolean = true,
+  author: string = "Claude",
+): Promise<string> {
+  if (edits.length === 0) {
+    return `No table paragraph edits to apply.`;
+  }
+
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const body = getBody(parsed);
+    const bodyIdxs = blockBodyIndices(body);
+
+    // Resolve and validate every target paragraph upfront.
+    const targets: XNode[] = [];
+    for (const e of edits) {
+      const cellChildren = getCellChildren(body, bodyIdxs, e.blockIndex, e.rowIndex, e.colIndex);
+      const where = `cell [${e.rowIndex},${e.colIndex}] of block ${e.blockIndex}`;
+      const paraEl = getCellParagraph(cellChildren, e.paragraphIndex, where);
+      if (trackChanges && paragraphHasRevisions(paraEl["w:p"] as XNode[])) {
+        throwPendingRevisions(`Paragraph ${e.paragraphIndex} in ${where}`);
+      }
+      targets.push(paraEl);
+    }
+
+    const ctx = trackChanges
+      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
+      : null;
+
+    // Collapse duplicate edits to the same paragraph (last-write-wins).
+    const finalText = new Map<XNode, string>();
+    edits.forEach((e, i) => finalText.set(targets[i], e.newText));
+    for (const [paraEl, newText] of finalText) {
+      replaceParagraphText(paraEl, newText, ctx);
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    const mode = trackChanges ? " (tracked)" : "";
+    return `Updated ${finalText.size} table paragraph(s) in ${path.basename(filePath)}${mode}.`;
+  });
+}
+
+export interface DeleteTableParagraphItem {
+  blockIndex: number;
+  rowIndex: number;
+  colIndex: number;
+  paragraphIndex: number;
+}
+
+export async function deleteTableParagraphs(
+  filePath: string,
+  targets: DeleteTableParagraphItem[],
+  trackChanges: boolean = true,
+  author: string = "Claude",
+): Promise<string> {
+  if (targets.length === 0) {
+    return `No table paragraphs to delete.`;
+  }
+
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const body = getBody(parsed);
+    const bodyIdxs = blockBodyIndices(body);
+
+    // Resolve and validate upfront, deduplicating by paragraph identity.
+    const resolved: { cellChildren: XNode[]; paraEl: XNode }[] = [];
+    const seen = new Set<XNode>();
+    for (const t of targets) {
+      const cellChildren = getCellChildren(body, bodyIdxs, t.blockIndex, t.rowIndex, t.colIndex);
+      const where = `cell [${t.rowIndex},${t.colIndex}] of block ${t.blockIndex}`;
+      const paraEl = getCellParagraph(cellChildren, t.paragraphIndex, where);
+      if (trackChanges && paragraphHasRevisions(paraEl["w:p"] as XNode[])) {
+        throwPendingRevisions(`Paragraph ${t.paragraphIndex} in ${where}`);
+      }
+      if (seen.has(paraEl)) continue;
+      seen.add(paraEl);
+      resolved.push({ cellChildren, paraEl });
+    }
+
+    if (trackChanges) {
+      const ctx = newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author);
+      // Mark the paragraph's runs and its paragraph mark as deleted. The element
+      // stays in place, so the cell keeps at least one paragraph structurally.
+      for (const { paraEl } of resolved) {
+        markParagraphRunsAsDeleted(paraEl["w:p"] as XNode[], ctx);
+      }
+    } else {
+      // Hard delete by reference (order-independent).
+      for (const { cellChildren, paraEl } of resolved) {
+        const idx = cellChildren.indexOf(paraEl);
+        if (idx !== -1) cellChildren.splice(idx, 1);
+      }
+      // A <w:tc> must contain at least one <w:p>; restore a blank one if the
+      // last paragraph of a cell was removed.
+      const affectedCells = new Set(resolved.map((r) => r.cellChildren));
+      for (const cellChildren of affectedCells) {
+        if (!cellChildren.some((c: XNode) => c["w:p"])) {
+          cellChildren.push(el("w:p", []));
+        }
+      }
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    const mode = trackChanges ? " (tracked)" : "";
+    return `Deleted ${resolved.length} table paragraph(s) from ${path.basename(filePath)}${mode}.`;
+  });
+}
+
+/** Resolve build options for a cell-local insert (copy_format_from indexes within the same cell). */
+function resolveCellInsertOpts(
+  paras: XNode[],
+  numId?: number,
+  numLevel?: number,
+  copyFormatFrom?: number,
+): BuildParagraphOptions | undefined {
+  if (copyFormatFrom !== undefined) {
+    if (copyFormatFrom < 0 || copyFormatFrom >= paras.length) {
+      throw new EngineError(
+        ErrorCode.INDEX_OUT_OF_RANGE,
+        `copy_format_from index ${copyFormatFrom} out of range (0–${paras.length - 1}) for the target cell.`,
+      );
+    }
+    const pPr = findOne(paras[copyFormatFrom]["w:p"] as XNode[], "w:pPr");
+    return pPr ? { sourcePPr: pPr } : undefined;
+  }
+  if (numId !== undefined) {
+    return { numId, numLevel };
+  }
+  return undefined;
+}
+
+export interface InsertTableParagraphItem {
+  blockIndex: number;
+  rowIndex: number;
+  colIndex: number;
+  /** Cell-local paragraph index to insert before; out-of-range / -1 appends to the cell. */
+  position: number;
+  text: string;
+  style?: string;
+  numId?: number;
+  numLevel?: number;
+  /** Cell-local paragraph index whose pPr to deep-copy (overrides style/numId/numLevel). */
+  copyFormatFrom?: number;
+}
+
+export async function insertTableParagraphs(
+  filePath: string,
+  inserts: InsertTableParagraphItem[],
+  trackChanges: boolean = true,
+  author: string = "Claude",
+): Promise<string> {
+  if (inserts.length === 0) {
+    return `No table paragraphs to insert.`;
+  }
+
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const body = getBody(parsed);
+    const bodyIdxs = blockBodyIndices(body);
+
+    const ctx = trackChanges
+      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
+      : null;
+
+    // Resolve every insert against the ORIGINAL cell paragraph list: the anchor
+    // is the existing paragraph the new one goes before (null = append to cell).
+    // Anchoring by element reference keeps multiple inserts into the same cell
+    // correct and in array order, without the reverse-order quirk of body
+    // insert_paragraphs.
+    interface Resolved {
+      cellChildren: XNode[];
+      anchor: XNode | null;
+      newParas: XNode[];
+    }
+    const resolved: Resolved[] = [];
+    for (const ins of inserts) {
+      const cellChildren = getCellChildren(body, bodyIdxs, ins.blockIndex, ins.rowIndex, ins.colIndex);
+      const paras = findAll(cellChildren, "w:p");
+      const opts = resolveCellInsertOpts(paras, ins.numId, ins.numLevel, ins.copyFormatFrom);
+      // buildNewParagraph returns one or more <w:p> (untracked multi-line input
+      // splits on "\n"); splice them all in at the resolved spot.
+      const newParas = buildNewParagraph(ins.text, ins.style, ctx, opts);
+      // A non-integer / out-of-range / negative position appends (anchor null).
+      const anchor =
+        Number.isInteger(ins.position) && ins.position >= 0 && ins.position < paras.length
+          ? paras[ins.position]
+          : null;
+      resolved.push({ cellChildren, anchor, newParas });
+    }
+
+    for (const { cellChildren, anchor, newParas } of resolved) {
+      if (anchor) {
+        const idx = cellChildren.indexOf(anchor);
+        cellChildren.splice(idx === -1 ? cellChildren.length : idx, 0, ...newParas);
+      } else {
+        // Append after the cell's last paragraph. If the cell has no paragraph
+        // at all, append at the very end (never before w:tcPr, which must stay
+        // first; a cell's content also has to end with a paragraph).
+        let lastP = -1;
+        for (let i = 0; i < cellChildren.length; i++) {
+          if (cellChildren[i]["w:p"]) lastP = i;
+        }
+        const insertAt = lastP === -1 ? cellChildren.length : lastP + 1;
+        cellChildren.splice(insertAt, 0, ...newParas);
+      }
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    const mode = trackChanges ? " (tracked)" : "";
+    return `Inserted ${inserts.length} table paragraph(s) in ${path.basename(filePath)}${mode}.`;
   });
 }
 

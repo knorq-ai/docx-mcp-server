@@ -4,7 +4,7 @@
 
 ローカル [MCP](https://modelcontextprotocol.io/) サーバ。Word (.docx) ファイルの読み取り・編集を行う。Claude Code、Cursor、その他の MCP 対応クライアントで動作する。
 
-**36 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
+**39 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
 
 ## 機能一覧
 
@@ -18,7 +18,7 @@
 | **変更履歴** | `accept_all_changes`, `reject_all_changes` |
 | **ページレイアウト** | `get_page_layout`, `set_page_layout` |
 | **ヘッダ/フッタ** | `read_header_footer` |
-| **テーブル** | `read_table_structure`, `read_table_cell`, `edit_table_cells` |
+| **テーブル** | `read_table_structure`, `read_table_cell`, `edit_table_cells`, `edit_table_paragraphs`, `delete_table_paragraphs`, `insert_table_paragraphs` |
 | **脚注** | `read_footnotes` |
 
 ### 変更履歴 (Track Changes)
@@ -294,6 +294,21 @@ file_path, block_index, row_index, col_index
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
 ```
 
+**`edit_table_paragraphs`** — セル全体を置換せず、セル内の特定の 1 段落だけを編集する（セル内ローカルの `paragraph_index` で指定）。複数段落セルの 1 行（番号付きリストの 1 項目など）をピンポイントで変更したいときに使う。
+```
+file_path, edits (array of {block_index, row_index, col_index, paragraph_index, new_text}), track_changes?, author?
+```
+
+**`delete_table_paragraphs`** — セル内の特定の 1 段落を削除する。セルの最後の段落を削除した場合は空段落を残してセルを有効に保つ。実際の Word 番号付けは残りを自動的に振り直す。
+```
+file_path, targets (array of {block_index, row_index, col_index, paragraph_index}), track_changes?, author?
+```
+
+**`insert_table_paragraphs`** — セル内ローカル位置に段落を挿入する（`-1`/範囲外は末尾に追加）。`num_id`/`num_level` と `copy_format_from`（同一セル内の段落インデックス）に対応。
+```
+file_path, inserts (array of {block_index, row_index, col_index, position, text, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
+```
+
 ### 脚注
 
 **`read_footnotes`** — 全脚注の ID とテキスト内容を読み取り。
@@ -328,7 +343,7 @@ AI エージェントは Raw Python (python-docx) でも DOCX を操作できる
 
 単純な読み取り・段落書式は python-docx のクリーンな API により削減幅が小さい (~63–76%)。
 
-出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。36 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
+出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。39 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
 
 ## 動作要件
 

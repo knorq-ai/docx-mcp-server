@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] — 2026-06-01
+
+### Added
+- Per-paragraph table cell editing — address an individual `<w:p>` inside a `<w:tc>` by a cell-local paragraph index (counting only the cell's paragraphs; row/column are physical `w:tc` positions). Closes the last gap that previously forced raw-XML edits for table-heavy documents:
+  - `edit_table_paragraphs` — edit one paragraph of a multi-paragraph cell without replacing the whole cell.
+  - `delete_table_paragraphs` — delete one paragraph of a cell; if it was the cell's last paragraph, a blank one is kept so the cell stays valid. Real Word (`w:numPr`) numbering renumbers the rest automatically.
+  - `insert_table_paragraphs` — insert a paragraph at a cell-local position (`-1`/out-of-range appends). Supports `num_id`/`num_level` and `copy_format_from` (a paragraph index within the same cell). Multiple inserts into the same cell keep array order.
+  - All three support tracked changes (default) and the `allow_untracked_edit` safety flag, and refuse (tracked mode) paragraphs that already contain revision markup.
+
+### Fixed
+- `copy_format_from` (in `insert_paragraphs` and the new `insert_table_paragraphs`) no longer carries the source paragraph's stale tracked-change metadata (`w:pPrChange`, `pPr > rPr > w:rPrChange`) onto the newly inserted paragraph, where accept/reject could otherwise treat it as a live revision.
+
 ## [3.3.0] — 2026-06-01
 
 ### Added

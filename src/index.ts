@@ -42,6 +42,9 @@ import {
   rejectAllChanges,
   readHeaderFooter,
   editTableCells,
+  editTableParagraphs,
+  deleteTableParagraphs,
+  insertTableParagraphs,
   readFootnotes,
   listImages,
   EngineError,
@@ -1262,6 +1265,170 @@ server.tool(
         content: [{ type: "text", text: formatError(e) }],
         isError: true,
       };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: edit_table_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+const tableUntrackedFlag = z
+  .boolean()
+  .optional()
+  .default(false)
+  .describe(
+    "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+  );
+
+server.tool(
+  "edit_table_paragraphs",
+  "Edit one specific paragraph inside a table cell (addressed by a cell-local paragraph_index), without replacing the whole cell. Use this to surgically change a single line of a multi-paragraph cell (e.g. one item of a numbered list) while leaving the others untouched. paragraph_index counts only the cell's paragraphs (0-based); see read_table_cell. row/col are physical w:tc positions.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    edits: z
+      .array(
+        z.object({
+          block_index: z.number().describe("Index of the table block"),
+          row_index: z.number().describe("Zero-based row index"),
+          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+          paragraph_index: z.number().describe("Zero-based paragraph index within the cell"),
+          new_text: z.string().describe("New text content for that paragraph"),
+        }),
+      )
+      .describe("Array of table-paragraph edits"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record edits as tracked changes. Default true."),
+    author: z.string().optional().default("Claude").describe("Author name for tracked changes"),
+    allow_untracked_edit: tableUntrackedFlag,
+  },
+  async ({ file_path, edits, track_changes, author, allow_untracked_edit }) => {
+    try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
+      const engineEdits = edits.map((e) => ({
+        blockIndex: e.block_index,
+        rowIndex: e.row_index,
+        colIndex: e.col_index,
+        paragraphIndex: e.paragraph_index,
+        newText: e.new_text,
+      }));
+      const result = await editTableParagraphs(file_path, engineEdits, track_changes, author);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: delete_table_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "delete_table_paragraphs",
+  "Delete one specific paragraph inside a table cell (addressed by a cell-local paragraph_index). Use this to remove a single item from a multi-paragraph cell (e.g. one item of a numbered list) and let Word renumber the rest. If the deleted paragraph is the cell's last one, a blank paragraph is kept so the cell stays valid. paragraph_index counts only the cell's paragraphs (0-based); row/col are physical w:tc positions.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    targets: z
+      .array(
+        z.object({
+          block_index: z.number().describe("Index of the table block"),
+          row_index: z.number().describe("Zero-based row index"),
+          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+          paragraph_index: z.number().describe("Zero-based paragraph index within the cell"),
+        }),
+      )
+      .describe("Array of table paragraphs to delete"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record deletions as tracked changes. Default true."),
+    author: z.string().optional().default("Claude").describe("Author name for tracked changes"),
+    allow_untracked_edit: tableUntrackedFlag,
+  },
+  async ({ file_path, targets, track_changes, author, allow_untracked_edit }) => {
+    try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
+      const engineTargets = targets.map((t) => ({
+        blockIndex: t.block_index,
+        rowIndex: t.row_index,
+        colIndex: t.col_index,
+        paragraphIndex: t.paragraph_index,
+      }));
+      const result = await deleteTableParagraphs(file_path, engineTargets, track_changes, author);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: insert_table_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "insert_table_paragraphs",
+  "Insert a new paragraph inside a table cell at a cell-local position (insert before the paragraph currently at that index; an out-of-range position or -1 appends to the cell). Supports numbering (num_id/num_level) and format copying (copy_format_from, which references a paragraph index WITHIN the same cell). Multiple inserts into the same cell keep array order. row/col are physical w:tc positions.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    inserts: z
+      .array(
+        z.object({
+          block_index: z.number().describe("Index of the table block"),
+          row_index: z.number().describe("Zero-based row index"),
+          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+          position: z
+            .number()
+            .describe("Cell-local paragraph index to insert before (-1 or out-of-range appends to the cell)"),
+          text: z.string().describe("Text content of the new paragraph"),
+          style: z.string().optional().describe("Paragraph style (e.g., 'Normal')"),
+          num_id: z
+            .number()
+            .optional()
+            .describe("Numbering definition ID (w:numId). Ignored if copy_format_from is set."),
+          num_level: z
+            .number()
+            .optional()
+            .default(0)
+            .describe("Numbering indentation level (w:ilvl), 0-based. Default 0."),
+          copy_format_from: z
+            .number()
+            .optional()
+            .describe("Paragraph index WITHIN THE SAME CELL whose w:pPr to deep-copy. Overrides style/num_id/num_level."),
+        }),
+      )
+      .describe("Array of table paragraphs to insert"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record insertions as tracked changes. Default true."),
+    author: z.string().optional().default("Claude").describe("Author name for tracked changes"),
+    allow_untracked_edit: tableUntrackedFlag,
+  },
+  async ({ file_path, inserts, track_changes, author, allow_untracked_edit }) => {
+    try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
+      const engineInserts = inserts.map((i) => ({
+        blockIndex: i.block_index,
+        rowIndex: i.row_index,
+        colIndex: i.col_index,
+        position: i.position,
+        text: i.text,
+        style: i.style,
+        numId: i.num_id,
+        numLevel: i.num_level,
+        copyFormatFrom: i.copy_format_from,
+      }));
+      const result = await insertTableParagraphs(file_path, engineInserts, track_changes, author);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
     }
   },
 );

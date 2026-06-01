@@ -110,6 +110,16 @@ insert_paragraphs(paragraphs=[{text: "遡及適用", position: 104, copy_format_
 
 指定ブロックインデックスの `w:pPr` を丸ごと deep-copy する。番号定義・インデント・行間・罫線等すべてが引き継がれる。`copy_format_from` 指定時は `style` / `num_id` / `num_level` は無視される。
 
+## テーブルセル内の段落編集
+
+`edit_table_cells` はセル全体を対象にする。複数段落セル（番号付きリスト等）の特定の 1 段落だけを操作するには、セル内ローカルの段落インデックス（セル内の `w:p` のみを 0 始まりで数える）で指定する専用ツールを使う。
+
+- `edit_table_paragraphs(block, row, col, paragraph_index, new_text)` … セル内 1 段落だけ置換
+- `delete_table_paragraphs(block, row, col, paragraph_index)` … セル内 1 段落だけ削除（最後の 1 段落を消すと空段落を残す。`w:numPr` の自動番号は Word が振り直す）
+- `insert_table_paragraphs(block, row, col, position, text, copy_format_from?)` … セル内ローカル位置に挿入（`position: -1` で末尾追加。`copy_format_from` は同一セル内の段落インデックス）
+
+row/col は物理的な `w:tc` 位置（`edit_table_cells` と同じ規約）。セル内の段落構成は `read_document` の `[TABLE]` 出力で確認できる。
+
 ## アンチパターン
 
 - `read_document` で全体を読んでから書き換える → ブロックインデックスのずれが発生する。代わりに `search_text` で対象を特定してから最小範囲の編集を行う
