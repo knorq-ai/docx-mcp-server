@@ -4,13 +4,13 @@
 
 ローカル [MCP](https://modelcontextprotocol.io/) サーバ。Word (.docx) ファイルの読み取り・編集を行う。Claude Code、Cursor、その他の MCP 対応クライアントで動作する。
 
-**33 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
+**36 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
 
 ## 機能一覧
 
 | カテゴリ | ツール |
 |---------|--------|
-| **読み取り** | `read_document`, `get_document_info`, `search_text`, `list_images` |
+| **読み取り** | `read_document`, `get_document_info`, `search_text`, `list_images`, `get_paragraph_format` |
 | **編集** | `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs` |
 | **書式** | `format_text`, `set_paragraph_formats`, `highlight_text`, `set_headings` |
 | **構造** | `insert_table`, `create_document`, `apply_document_preset` |
@@ -18,7 +18,7 @@
 | **変更履歴** | `accept_all_changes`, `reject_all_changes` |
 | **ページレイアウト** | `get_page_layout`, `set_page_layout` |
 | **ヘッダ/フッタ** | `read_header_footer` |
-| **テーブル** | `edit_table_cells` |
+| **テーブル** | `read_table_structure`, `read_table_cell`, `edit_table_cells` |
 | **脚注** | `read_footnotes` |
 
 ### 変更履歴 (Track Changes)
@@ -143,6 +143,11 @@ file_path, query, case_sensitive?
 **`list_images`** — 埋め込み画像の一覧（ファイル名、サイズ、代替テキスト、ブロックインデックス）。
 ```
 file_path
+```
+
+**`get_paragraph_format`** — 段落の書式を取得する（スタイル、見出しレベル、配置、番号付け、インデント[twips]、行間[pt]）。`insert_paragraphs` の `copy_format_from` の参照元を探すときや、2 つの段落の見た目が異なる原因を調べるときに使う。値は `set_paragraph_formats` が受け付ける単位で返す。
+```
+file_path, paragraph_index
 ```
 
 ### 編集
@@ -274,6 +279,16 @@ file_path
 
 ### テーブル
 
+**`read_table_structure`** — ドキュメント全体を読まずにテーブルを調べる。行・列数と各セルの短いプレビュー、各セルの結合情報（`gridSpan` / `vMerge`）を返す。インデックスは物理的な `w:tc` 位置で、`read_table_cell` / `edit_table_cells` と同じ規約。
+```
+file_path, block_index
+```
+
+**`read_table_cell`** — ドキュメント全体を読まずに 1 つのセルを読む。セルの段落（テキスト + スタイル・配置・番号付け）と結合情報を返す。
+```
+file_path, block_index, row_index, col_index
+```
+
 **`edit_table_cells`** — 1 回の open/save サイクルで 1 件以上のテーブルセルを置換する。異なるテーブルにまたがることも可能。`new_text` 中の `\n` は段落区切りとして扱う。変更履歴オフの編集は**セル全体**を置換し、各行を個別の段落にする（再編集しても古い行が残らない）。変更履歴オンの編集はセル先頭段落を差分置換し、`\n` をソフトブレークとして描画する。
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
@@ -313,7 +328,7 @@ AI エージェントは Raw Python (python-docx) でも DOCX を操作できる
 
 単純な読み取り・段落書式は python-docx のクリーンな API により削減幅が小さい (~63–76%)。
 
-出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。33 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
+出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。36 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
 
 ## 動作要件
 

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] — 2026-06-01
+
+### Added
+- `read_table_structure` tool — inspect a table without reading the whole document. Returns row/column dimensions and a short preview of every cell, plus each cell's horizontal merge span (`gridSpan`) and vertical merge state (`vMerge`). Indices are physical `w:tc` positions, matching `read_table_cell` / `edit_table_cells`.
+- `read_table_cell` tool — read a single cell's paragraphs (text + style/alignment/numbering) and merge info, without reading the whole document.
+- `get_paragraph_format` tool — introspect a paragraph's formatting: style, heading level, alignment, numbering (`numId`/level), indentation (twips) and spacing (points). Pairs with `set_paragraph_formats` (same units) and helps choose an `insert_paragraphs` `copy_format_from` source or debug formatting differences.
+
+### Changed
+- `search_text` now descends into tables: a match inside a table is reported per cell with `rowIndex` / `colIndex` (instead of a single block-level match against the flattened table text), so results can drive `edit_table_cells` directly. Plain paragraph matches are unchanged and leave `rowIndex` / `colIndex` undefined.
+
 ## [3.2.0] — 2026-06-01
 
 ### Fixed

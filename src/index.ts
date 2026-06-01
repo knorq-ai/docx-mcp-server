@@ -17,6 +17,9 @@ import {
   readDocument,
   getDocumentInfo,
   searchText,
+  readTableCell,
+  readTableStructure,
+  getParagraphFormat,
   replaceTexts,
   editParagraphs,
   insertParagraphs,
@@ -183,6 +186,84 @@ server.tool(
   async ({ file_path, query, case_sensitive }) => {
     try {
       const result = await searchText(file_path, query, case_sensitive);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: read_table_structure
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "read_table_structure",
+  "Inspect a table without reading the whole document. Returns the row/column dimensions and a short text preview of every cell, plus each cell's horizontal merge span (gridSpan) and vertical merge state (vMerge). Indices are physical w:tc positions — the same convention edit_table_cells / read_table_cell use.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    block_index: z
+      .number()
+      .describe("Block index of the table (from read_document / get_document_info)"),
+  },
+  async ({ file_path, block_index }) => {
+    try {
+      const result = await readTableStructure(file_path, block_index);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: read_table_cell
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "read_table_cell",
+  "Read a single table cell without reading the whole document. Returns the cell's paragraphs (text + style/alignment/numbering) and its merge info (gridSpan / vMerge). Pair with edit_table_cells to inspect before editing.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    block_index: z.number().describe("Block index of the table"),
+    row_index: z.number().describe("Zero-based row index"),
+    col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+  },
+  async ({ file_path, block_index, row_index, col_index }) => {
+    try {
+      const result = await readTableCell(file_path, block_index, row_index, col_index);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: get_paragraph_format
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "get_paragraph_format",
+  "Introspect a paragraph's formatting: style, heading level, alignment, numbering (numId/level), indentation (twips) and spacing (points). Useful to discover which existing paragraph to pass to insert_paragraphs' copy_format_from, or to debug why two paragraphs render differently. Values are returned in the same units set_paragraph_formats accepts.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    paragraph_index: z
+      .number()
+      .describe("Block index of the paragraph (from read_document / get_document_info)"),
+  },
+  async ({ file_path, paragraph_index }) => {
+    try {
+      const result = await getParagraphFormat(file_path, paragraph_index);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {

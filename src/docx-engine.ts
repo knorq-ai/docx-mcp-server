@@ -350,7 +350,11 @@ export async function searchText(
 
   let output = `Found ${result.totalMatches} match(es) for "${query}":\n\n`;
   for (const m of result.matches) {
-    output += `[Block ${m.blockIndex}] ${m.context}\n`;
+    const loc =
+      m.rowIndex !== undefined
+        ? `[Block ${m.blockIndex} · cell ${m.rowIndex},${m.colIndex}]`
+        : `[Block ${m.blockIndex}]`;
+    output += `${loc} ${m.context}\n`;
   }
 
   output += "\n\n<json>\n" + JSON.stringify(result) + "\n</json>";
@@ -367,6 +371,10 @@ export interface SearchMatch {
   occurrences: number;
   context: string;
   fullText: string;
+  /** When the match is inside a table cell, the cell's zero-based row index. */
+  rowIndex?: number;
+  /** When the match is inside a table cell, the cell's zero-based column index. */
+  colIndex?: number;
 }
 
 /** searchTextStructured の戻り値型 */
@@ -377,8 +385,41 @@ export interface SearchTextResult {
   matches: SearchMatch[];
 }
 
+/** Count occurrences of searchStr in compare and build a context snippet from fullText. */
+function buildTextMatch(
+  fullText: string,
+  compare: string,
+  searchStr: string,
+  queryLen: number,
+): { occurrences: number; context: string } | null {
+  const first = compare.indexOf(searchStr);
+  if (first === -1) return null;
+
+  let occurrences = 0;
+  let searchFrom = 0;
+  while (true) {
+    const idx = compare.indexOf(searchStr, searchFrom);
+    if (idx === -1) break;
+    occurrences++;
+    searchFrom = idx + searchStr.length;
+  }
+
+  const ctxStart = Math.max(0, first - 40);
+  const ctxEnd = Math.min(fullText.length, first + queryLen + 40);
+  const context =
+    (ctxStart > 0 ? "..." : "") +
+    fullText.substring(ctxStart, ctxEnd) +
+    (ctxEnd < fullText.length ? "..." : "");
+  return { occurrences, context };
+}
+
 /**
  * searchText と同じロジックだが、テキストではなく構造化オブジェクトを返す。
+ *
+ * Block indices mirror read_document. A match inside a table descends into the
+ * table and is reported per cell with rowIndex / colIndex (instead of a single
+ * block-level match against the flattened table text), so callers can drive
+ * edit_table_cells directly.
  */
 export async function searchTextStructured(
   filePath: string,
@@ -388,40 +429,60 @@ export async function searchTextStructured(
   const handle = await openDocx(filePath);
   const parsed = await parseDocXml(handle);
   const body = getBody(parsed);
-  const blocks = enumerateBlocks(body);
 
   const searchStr = caseSensitive ? query : query.toLowerCase();
   const matches: SearchMatch[] = [];
   let totalMatches = 0;
 
-  for (const b of blocks) {
-    const compare = caseSensitive ? b.text : b.text.toLowerCase();
-    if (compare.includes(searchStr)) {
-      // ブロック内の出現回数をカウント
-      let occurrences = 0;
-      let searchFrom = 0;
-      while (true) {
-        const idx = compare.indexOf(searchStr, searchFrom);
-        if (idx === -1) break;
-        occurrences++;
-        searchFrom = idx + searchStr.length;
-      }
-      totalMatches += occurrences;
+  const tryMatchParagraph = (blockIndex: number, pChildren: XNode[]): void => {
+    const text = extractParagraphText(pChildren, false);
+    const compare = caseSensitive ? text : text.toLowerCase();
+    const m = buildTextMatch(text, compare, searchStr, query.length);
+    if (m) {
+      totalMatches += m.occurrences;
+      matches.push({ blockIndex, occurrences: m.occurrences, context: m.context, fullText: text });
+    }
+  };
 
-      // 最初のマッチ周辺のコンテキストを抽出
-      const matchIdx = compare.indexOf(searchStr);
-      const ctxStart = Math.max(0, matchIdx - 40);
-      const ctxEnd = Math.min(b.text.length, matchIdx + query.length + 40);
-      const ctx =
-        (ctxStart > 0 ? "..." : "") +
-        b.text.substring(ctxStart, ctxEnd) +
-        (ctxEnd < b.text.length ? "..." : "");
-      matches.push({
-        blockIndex: b.index,
-        occurrences,
-        context: ctx,
-        fullText: b.text,
+  // Walk the body in the same order/indexing as enumerateBlocks (table counts
+  // as one block; w:sdt content controls expand to their inner paragraphs).
+  let idx = 0;
+  for (const child of body) {
+    if (child["w:p"]) {
+      tryMatchParagraph(idx, child["w:p"] as XNode[]);
+      idx++;
+    } else if (child["w:tbl"]) {
+      const rows = findAll(child["w:tbl"] as XNode[], "w:tr");
+      rows.forEach((row, rowIndex) => {
+        const cells = findAll(row["w:tr"] as XNode[], "w:tc");
+        cells.forEach((tc, colIndex) => {
+          const text = tableCellText(tc["w:tc"] as XNode[], false);
+          const compare = caseSensitive ? text : text.toLowerCase();
+          const m = buildTextMatch(text, compare, searchStr, query.length);
+          if (m) {
+            totalMatches += m.occurrences;
+            matches.push({
+              blockIndex: idx,
+              occurrences: m.occurrences,
+              context: m.context,
+              fullText: text,
+              rowIndex,
+              colIndex,
+            });
+          }
+        });
       });
+      idx++;
+    } else if (child["w:sdt"]) {
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) {
+        for (const contentChild of sdtContent["w:sdtContent"] as XNode[]) {
+          if (contentChild["w:p"]) {
+            tryMatchParagraph(idx, contentChild["w:p"] as XNode[]);
+            idx++;
+          }
+        }
+      }
     }
   }
 
@@ -431,6 +492,388 @@ export async function searchTextStructured(
     totalMatches,
     matches,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Table reading helpers (read-only navigation + introspection)
+// ---------------------------------------------------------------------------
+
+/** Resolve a table block to its <w:tbl> children, validating index and type. */
+function getTableChildren(body: XNode[], bodyIdxs: number[], blockIndex: number): XNode[] {
+  if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
+  }
+  const element = body[bodyIdxs[blockIndex]];
+  if (!element["w:tbl"]) {
+    throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
+  }
+  return element["w:tbl"] as XNode[];
+}
+
+/** Horizontal merge span of a cell (w:gridSpan), default 1. */
+function cellGridSpan(tcChildren: XNode[]): number {
+  const tcPr = findOne(tcChildren, "w:tcPr");
+  if (!tcPr) return 1;
+  const gs = findOne(tcPr["w:tcPr"] as XNode[], "w:gridSpan");
+  if (!gs) return 1;
+  const v = parseInt(attr(gs, "w:val") ?? "1", 10);
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+/**
+ * Vertical merge state of a cell: "restart" (top of a merged span),
+ * "continue" (covered by the cell above), or null (not vertically merged).
+ * A bare <w:vMerge/> with no w:val means "continue".
+ */
+function cellVMerge(tcChildren: XNode[]): string | null {
+  const tcPr = findOne(tcChildren, "w:tcPr");
+  if (!tcPr) return null;
+  const vm = findOne(tcPr["w:tcPr"] as XNode[], "w:vMerge");
+  if (!vm) return null;
+  return attr(vm, "w:val") ?? "continue";
+}
+
+/** Text of one cell: its paragraphs joined by real "\n" (nested tables flattened). */
+function tableCellText(tcChildren: XNode[], showRevisions: boolean): string {
+  const parts: string[] = [];
+  for (const child of tcChildren) {
+    if (child["w:p"]) parts.push(extractParagraphText(child["w:p"], showRevisions));
+    else if (child["w:tbl"]) parts.push(extractTableText(child["w:tbl"], showRevisions));
+  }
+  return parts.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 3c. read_table_structure (structured)
+// ---------------------------------------------------------------------------
+
+export interface TableStructureCell {
+  rowIndex: number;
+  colIndex: number;
+  /** Horizontal span (w:gridSpan); >1 means this cell covers several grid columns. */
+  gridSpan: number;
+  /** Vertical merge: "restart" | "continue" | null. */
+  vMerge: string | null;
+  /** Truncated cell text for a quick overview. */
+  preview: string;
+}
+
+export interface TableStructureResult {
+  file: string;
+  blockIndex: number;
+  rows: number;
+  /** Maximum number of physical <w:tc> cells in any row. */
+  cols: number;
+  cells: TableStructureCell[];
+}
+
+const PREVIEW_LEN = 40;
+
+function previewText(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > PREVIEW_LEN ? oneLine.slice(0, PREVIEW_LEN) + "…" : oneLine;
+}
+
+export async function readTableStructureStructured(
+  filePath: string,
+  blockIndex: number,
+): Promise<TableStructureResult> {
+  const handle = await openDocx(filePath);
+  const parsed = await parseDocXml(handle);
+  const body = getBody(parsed);
+  const bodyIdxs = blockBodyIndices(body);
+  const tblChildren = getTableChildren(body, bodyIdxs, blockIndex);
+
+  const rows = findAll(tblChildren, "w:tr");
+  const cells: TableStructureCell[] = [];
+  let maxCols = 0;
+  rows.forEach((row, rowIndex) => {
+    const tcs = findAll(row["w:tr"] as XNode[], "w:tc");
+    if (tcs.length > maxCols) maxCols = tcs.length;
+    tcs.forEach((tc, colIndex) => {
+      const tcChildren = tc["w:tc"] as XNode[];
+      cells.push({
+        rowIndex,
+        colIndex,
+        gridSpan: cellGridSpan(tcChildren),
+        vMerge: cellVMerge(tcChildren),
+        preview: previewText(tableCellText(tcChildren, false)),
+      });
+    });
+  });
+
+  return {
+    file: path.basename(filePath),
+    blockIndex,
+    rows: rows.length,
+    cols: maxCols,
+    cells,
+  };
+}
+
+export async function readTableStructure(filePath: string, blockIndex: number): Promise<string> {
+  const r = await readTableStructureStructured(filePath, blockIndex);
+  let out = `Table at block ${r.blockIndex} in ${r.file}: ${r.rows} row(s) × up to ${r.cols} column(s).\n\n`;
+  for (let row = 0; row < r.rows; row++) {
+    const rowCells = r.cells.filter((c) => c.rowIndex === row);
+    const parts = rowCells.map((c) => {
+      let label = `[${c.rowIndex},${c.colIndex}]`;
+      if (c.gridSpan > 1) label += `(span ${c.gridSpan})`;
+      if (c.vMerge) label += `(vMerge:${c.vMerge})`;
+      return `${label} ${c.preview}`;
+    });
+    out += "| " + parts.join(" | ") + " |\n";
+  }
+  out += "\n<json>\n" + JSON.stringify(r) + "\n</json>";
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 3d. read_table_cell (structured)
+// ---------------------------------------------------------------------------
+
+export interface TableCellParagraphInfo {
+  paragraphIndex: number;
+  text: string;
+  style?: string;
+  alignment?: string;
+  numId?: number;
+  numLevel?: number;
+}
+
+export interface TableCellReadResult {
+  file: string;
+  blockIndex: number;
+  rowIndex: number;
+  colIndex: number;
+  gridSpan: number;
+  vMerge: string | null;
+  paragraphs: TableCellParagraphInfo[];
+}
+
+/** Navigate to a cell's <w:tc> children (read-only), validating each index. */
+function getTableCellChildren(
+  body: XNode[],
+  bodyIdxs: number[],
+  blockIndex: number,
+  rowIndex: number,
+  colIndex: number,
+): XNode[] {
+  const tblChildren = getTableChildren(body, bodyIdxs, blockIndex);
+  const rows = findAll(tblChildren, "w:tr");
+  if (rowIndex < 0 || rowIndex >= rows.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
+  }
+  const cells = findAll(rows[rowIndex]["w:tr"] as XNode[], "w:tc");
+  if (colIndex < 0 || colIndex >= cells.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${colIndex} out of range (0–${cells.length - 1}).`);
+  }
+  return cells[colIndex]["w:tc"] as XNode[];
+}
+
+export async function readTableCellStructured(
+  filePath: string,
+  blockIndex: number,
+  rowIndex: number,
+  colIndex: number,
+): Promise<TableCellReadResult> {
+  const handle = await openDocx(filePath);
+  const parsed = await parseDocXml(handle);
+  const body = getBody(parsed);
+  const bodyIdxs = blockBodyIndices(body);
+  const tcChildren = getTableCellChildren(body, bodyIdxs, blockIndex, rowIndex, colIndex);
+
+  const paragraphs: TableCellParagraphInfo[] = [];
+  let pIdx = 0;
+  for (const child of tcChildren) {
+    if (child["w:p"]) {
+      const pChildren = child["w:p"] as XNode[];
+      const numPr = readNumbering(pChildren);
+      paragraphs.push({
+        paragraphIndex: pIdx,
+        text: extractParagraphText(pChildren, false),
+        style: getParagraphStyle(pChildren),
+        alignment: readAlignment(pChildren),
+        numId: numPr?.numId,
+        numLevel: numPr?.numLevel,
+      });
+      pIdx++;
+    }
+  }
+
+  return {
+    file: path.basename(filePath),
+    blockIndex,
+    rowIndex,
+    colIndex,
+    gridSpan: cellGridSpan(tcChildren),
+    vMerge: cellVMerge(tcChildren),
+    paragraphs,
+  };
+}
+
+export async function readTableCell(
+  filePath: string,
+  blockIndex: number,
+  rowIndex: number,
+  colIndex: number,
+): Promise<string> {
+  const r = await readTableCellStructured(filePath, blockIndex, rowIndex, colIndex);
+  let out = `Cell [${r.rowIndex},${r.colIndex}] of the table at block ${r.blockIndex} in ${r.file}`;
+  if (r.gridSpan > 1) out += ` (gridSpan ${r.gridSpan})`;
+  if (r.vMerge) out += ` (vMerge: ${r.vMerge})`;
+  out += `: ${r.paragraphs.length} paragraph(s).\n\n`;
+  for (const p of r.paragraphs) {
+    let prefix = `(p${p.paragraphIndex})`;
+    if (p.style && p.style !== "Normal") prefix += ` [${p.style}]`;
+    if (p.numId !== undefined) prefix += ` [num ${p.numId}/${p.numLevel ?? 0}]`;
+    out += `${prefix} ${p.text}\n`;
+  }
+  out += "\n<json>\n" + JSON.stringify(r) + "\n</json>";
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 3e. get_paragraph_format (structured)
+// ---------------------------------------------------------------------------
+
+/** Read the alignment of a paragraph, normalized to left/center/right/justify. */
+function readAlignment(pChildren: XNode[]): string | undefined {
+  const pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) return undefined;
+  const jc = findOne(pPr["w:pPr"] as XNode[], "w:jc");
+  if (!jc) return undefined;
+  const val = attr(jc, "w:val");
+  if (!val) return undefined;
+  return val === "both" ? "justify" : val;
+}
+
+/** Read numbering (w:numPr) of a paragraph. */
+function readNumbering(pChildren: XNode[]): { numId: number; numLevel: number } | undefined {
+  const pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) return undefined;
+  const numPr = findOne(pPr["w:pPr"] as XNode[], "w:numPr");
+  if (!numPr) return undefined;
+  const numPrChildren = numPr["w:numPr"] as XNode[];
+  const numIdEl = findOne(numPrChildren, "w:numId");
+  if (!numIdEl) return undefined;
+  const numId = parseInt(attr(numIdEl, "w:val") ?? "", 10);
+  if (!Number.isFinite(numId)) return undefined;
+  const ilvlEl = findOne(numPrChildren, "w:ilvl");
+  const numLevel = ilvlEl ? parseInt(attr(ilvlEl, "w:val") ?? "0", 10) : 0;
+  return { numId, numLevel: Number.isFinite(numLevel) ? numLevel : 0 };
+}
+
+function intAttr(node: XNode | undefined, name: string): number | undefined {
+  if (!node) return undefined;
+  const raw = attr(node, name);
+  if (raw === undefined) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+export interface ParagraphFormatResult {
+  file: string;
+  paragraphIndex: number;
+  style?: string;
+  headingLevel?: number;
+  /** Normalized: left | center | right | justify. */
+  alignment?: string;
+  numId?: number;
+  numLevel?: number;
+  /** Indentation in twips (1440 = 1 inch), as accepted by set_paragraph_formats. */
+  indentLeft?: number;
+  indentRight?: number;
+  firstLineIndent?: number;
+  hangingIndent?: number;
+  /** Spacing before/after in points (as accepted by set_paragraph_formats). */
+  spaceBefore?: number;
+  spaceAfter?: number;
+  /** Line spacing: raw w:line value plus rule. spaceLine is points when the rule is "exact". */
+  lineRule?: string;
+  lineValue?: number;
+  spaceLine?: number;
+}
+
+export async function getParagraphFormatStructured(
+  filePath: string,
+  paragraphIndex: number,
+): Promise<ParagraphFormatResult> {
+  const handle = await openDocx(filePath);
+  const parsed = await parseDocXml(handle);
+  const body = getBody(parsed);
+  const bodyIdxs = blockBodyIndices(body);
+
+  if (paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
+  }
+  const element = body[bodyIdxs[paragraphIndex]];
+  if (!element["w:p"]) {
+    throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${paragraphIndex} is not a paragraph (it may be a table).`);
+  }
+
+  const pChildren = element["w:p"] as XNode[];
+  const style = getParagraphStyle(pChildren);
+  const result: ParagraphFormatResult = {
+    file: path.basename(filePath),
+    paragraphIndex,
+    style,
+    headingLevel: getHeadingLevel(style),
+    alignment: readAlignment(pChildren),
+  };
+
+  const num = readNumbering(pChildren);
+  if (num) {
+    result.numId = num.numId;
+    result.numLevel = num.numLevel;
+  }
+
+  const pPr = findOne(pChildren, "w:pPr");
+  if (pPr) {
+    const props = pPr["w:pPr"] as XNode[];
+    const ind = findOne(props, "w:ind");
+    result.indentLeft = intAttr(ind, "w:left");
+    result.indentRight = intAttr(ind, "w:right");
+    result.firstLineIndent = intAttr(ind, "w:firstLine");
+    result.hangingIndent = intAttr(ind, "w:hanging");
+
+    const spacing = findOne(props, "w:spacing");
+    if (spacing) {
+      const before = intAttr(spacing, "w:before");
+      const after = intAttr(spacing, "w:after");
+      if (before !== undefined) result.spaceBefore = before / 20;
+      if (after !== undefined) result.spaceAfter = after / 20;
+      const line = intAttr(spacing, "w:line");
+      const rule = attr(spacing, "w:lineRule");
+      if (line !== undefined) {
+        result.lineValue = line;
+        if (rule) result.lineRule = rule;
+        if (rule === "exact" || rule === "atLeast") result.spaceLine = line / 20;
+      }
+    }
+  }
+
+  return result;
+}
+
+export async function getParagraphFormat(filePath: string, paragraphIndex: number): Promise<string> {
+  const r = await getParagraphFormatStructured(filePath, paragraphIndex);
+  const lines: string[] = [`Format of paragraph ${r.paragraphIndex} in ${r.file}:`];
+  lines.push(`  style: ${r.style ?? "(default)"}${r.headingLevel ? ` (Heading ${r.headingLevel})` : ""}`);
+  lines.push(`  alignment: ${r.alignment ?? "left (default)"}`);
+  if (r.numId !== undefined) lines.push(`  numbering: numId ${r.numId}, level ${r.numLevel ?? 0}`);
+  const indParts: string[] = [];
+  if (r.indentLeft !== undefined) indParts.push(`left ${r.indentLeft}`);
+  if (r.indentRight !== undefined) indParts.push(`right ${r.indentRight}`);
+  if (r.firstLineIndent !== undefined) indParts.push(`firstLine ${r.firstLineIndent}`);
+  if (r.hangingIndent !== undefined) indParts.push(`hanging ${r.hangingIndent}`);
+  if (indParts.length) lines.push(`  indent (twips): ${indParts.join(", ")}`);
+  const spParts: string[] = [];
+  if (r.spaceBefore !== undefined) spParts.push(`before ${r.spaceBefore}pt`);
+  if (r.spaceAfter !== undefined) spParts.push(`after ${r.spaceAfter}pt`);
+  if (r.lineValue !== undefined) spParts.push(`line ${r.lineValue}${r.lineRule ? ` (${r.lineRule})` : ""}`);
+  if (spParts.length) lines.push(`  spacing: ${spParts.join(", ")}`);
+  return lines.join("\n") + "\n\n<json>\n" + JSON.stringify(r) + "\n</json>";
 }
 
 // ---------------------------------------------------------------------------

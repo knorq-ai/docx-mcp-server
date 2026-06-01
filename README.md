@@ -4,13 +4,13 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**33 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**36 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
 | Category | Tools |
 |---|---|
-| **Read** | `read_document`, `get_document_info`, `search_text`, `list_images` |
+| **Read** | `read_document`, `get_document_info`, `search_text`, `list_images`, `get_paragraph_format` |
 | **Edit** | `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs` |
 | **Format** | `format_text`, `set_paragraph_formats`, `highlight_text`, `set_headings` |
 | **Structure** | `insert_table`, `create_document`, `apply_document_preset` |
@@ -18,7 +18,7 @@ A local [MCP](https://modelcontextprotocol.io/) server for reading and editing W
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
 | **Headers/footers** | `read_header_footer` |
-| **Tables** | `edit_table_cells` |
+| **Tables** | `read_table_structure`, `read_table_cell`, `edit_table_cells` |
 | **Footnotes** | `read_footnotes` |
 
 ### Track changes
@@ -188,6 +188,11 @@ file_path, query, case_sensitive?
 file_path
 ```
 
+**`get_paragraph_format`** — Introspect a paragraph's formatting (style, heading level, alignment, numbering, indentation in twips, spacing in points). Use it to find a `copy_format_from` source or debug why two paragraphs render differently. Values match the units `set_paragraph_formats` accepts.
+```
+file_path, paragraph_index
+```
+
 ### Editing
 
 All editing tools accept `track_changes` (default `true`) and `author` (default `"Claude"`).
@@ -317,6 +322,16 @@ file_path
 
 ### Tables
 
+**`read_table_structure`** — Inspect a table without reading the whole document: row/column dimensions and a short preview of every cell, plus each cell's merge info (`gridSpan` / `vMerge`). Indices are physical `w:tc` positions, matching `read_table_cell` / `edit_table_cells`.
+```
+file_path, block_index
+```
+
+**`read_table_cell`** — Read a single cell's paragraphs (text + style/alignment/numbering) and merge info, without reading the whole document.
+```
+file_path, block_index, row_index, col_index
+```
+
 **`edit_table_cells`** — Replace the text content of one or more table cells in a single open/save cycle. Cells can span different tables. A `\n` in `new_text` is a paragraph break: untracked edits replace the **whole cell**, turning each line into its own paragraph (so re-editing leaves no stale lines); tracked edits diff-replace the cell's first paragraph and render `\n` as a soft line break.
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
@@ -356,7 +371,7 @@ The savings are especially large for **tracked changes**, **comments**, and **ru
 
 Simple read and paragraph-format operations see smaller savings (~63–76%) since python-docx has clean APIs for these.
 
-Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 33 tools) pays for itself in 3–5 operations.
+Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 36 tools) pays for itself in 3–5 operations.
 
 ## Requirements
 

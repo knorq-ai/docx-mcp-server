@@ -51,8 +51,9 @@ npx vitest run    # 全テスト実行
 
 1. `get_document_info` でドキュメントの構造を把握する
 2. `read_document` で対象範囲を読む（start_paragraph / end_paragraph で範囲指定可能）
-3. `search_text` で編集対象のブロックを特定する
-4. 編集系ツール（`edit_paragraphs`, `replace_texts` 等）で変更を行う
+3. `search_text` で編集対象のブロックを特定する（テーブル内のマッチは row/col 付きで返る）
+4. ピンポイント確認には軽量ツールを使う: `read_table_structure` / `read_table_cell`（全体を読まずにテーブルを調べる）、`get_paragraph_format`（段落書式を調べる。`copy_format_from` の参照元探しに有用）
+5. 編集系ツール（`edit_paragraphs`, `replace_texts` 等）で変更を行う
 
 ## デフォルト動作
 
@@ -74,7 +75,7 @@ npx vitest run    # 全テスト実行
 
 ## 構造化レスポンス
 
-`get_document_info`, `search_text`, `read_comments`, `list_images` はテキストの後に `<json>...</json>` ブロックで構造化データを返す。LLM はテキスト部分で自然言語応答を構成し、プログラムは JSON 部分をパースして利用できる。
+`get_document_info`, `search_text`, `read_comments`, `list_images`, `read_table_structure`, `read_table_cell`, `get_paragraph_format` はテキストの後に `<json>...</json>` ブロックで構造化データを返す。LLM はテキスト部分で自然言語応答を構成し、プログラムは JSON 部分をパースして利用できる。
 
 ## 書き込みロック
 
