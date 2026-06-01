@@ -4,13 +4,13 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**39 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**40 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
 | Category | Tools |
 |---|---|
-| **Read** | `read_document`, `get_document_info`, `search_text`, `list_images`, `get_paragraph_format` |
+| **Read** | `read_document`, `get_document_info`, `search_text`, `list_images`, `get_paragraph_format`, `ensure_anchors` |
 | **Edit** | `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs` |
 | **Format** | `format_text`, `set_paragraph_formats`, `highlight_text`, `set_headings` |
 | **Structure** | `insert_table`, `create_document`, `apply_document_preset` |
@@ -30,6 +30,16 @@ Track changes is **on by default**. Pass `track_changes: false` to make direct e
 Use `read_document` with `show_revisions: true` to see tracked changes annotated as `[-deleted-]` and `[+inserted+]`. The default view shows accepted text only.
 
 Use `accept_all_changes` / `reject_all_changes` to finalize or revert all pending revisions.
+
+### Stable anchors
+
+Paragraphs are normally addressed by integer block index, but every insert/delete shifts the indices of later blocks — so a multi-step edit has to re-read after each change. **Anchors** fix this: an anchor is a stable id (Word's `w14:paraId`) that stays attached to its paragraph across index shifts.
+
+- Run **`ensure_anchors`** once to assign anchors to every paragraph and get the full index→anchor map (most Word-authored documents already carry anchors; the call is idempotent).
+- `search_text` returns each match's `anchor`, and `read_document` with `show_anchors: true` prints them inline.
+- The edit tools (`edit_paragraphs`, `delete_paragraphs`, `set_paragraph_formats`, `set_headings`, `insert_paragraphs`) accept an `anchor` (or `anchors`) as an alternative to `paragraph_index`. Editing also auto-assigns an anchor to each touched/inserted paragraph and `insert_paragraphs` returns the new anchors, so a pipeline can keep editing without re-reading.
+
+v1 anchors cover top-level (direct-body) paragraphs; paragraphs inside tables or content controls are not anchored.
 
 ### Page layout
 
@@ -193,9 +203,14 @@ file_path
 file_path, paragraph_index
 ```
 
+**`ensure_anchors`** — Assign a stable anchor (`w14:paraId`) to every top-level paragraph that lacks one and return the index→anchor map. Idempotent. See [Stable anchors](#stable-anchors).
+```
+file_path
+```
+
 ### Editing
 
-All editing tools accept `track_changes` (default `true`) and `author` (default `"Claude"`).
+All editing tools accept `track_changes` (default `true`) and `author` (default `"Claude"`). The paragraph tools below accept an `anchor` (or `anchors`) in place of `paragraph_index` for index-shift-proof targeting — see [Stable anchors](#stable-anchors).
 
 **`replace_texts`** — Apply one or more find/replace operations in a single open/save cycle. Handles text spanning multiple runs.
 - Under `track_changes: false`, items are applied sequentially: a later item can match text produced by an earlier item.
@@ -204,19 +219,19 @@ All editing tools accept `track_changes` (default `true`) and `author` (default 
 file_path, items (array of {search, replace, case_sensitive?}), track_changes?, author?, include_headers_footers?
 ```
 
-**`edit_paragraphs`** — Replace the text content of one or more paragraphs in a single open/save cycle. A `\n` in `new_text` is a paragraph break: untracked edits split it into separate paragraphs (each inheriting the original numbering/indentation), tracked edits keep one paragraph and render `\n` as a soft line break.
+**`edit_paragraphs`** — Replace the text content of one or more paragraphs in a single open/save cycle. Target each by `paragraph_index` or `anchor`. A `\n` in `new_text` is a paragraph break: untracked edits split it into separate paragraphs (each inheriting the original numbering/indentation), tracked edits keep one paragraph and render `\n` as a soft line break.
 ```
-file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
-```
-
-**`insert_paragraphs`** — Insert one or more paragraphs in one operation. Handles index shifting internally. A `\n` in `text` is a paragraph break (untracked: one paragraph per line; tracked: soft line break). When several paragraphs share the same `position`, they land in the document in the reverse of array order — list them back-to-front or use separate calls.
-```
-file_path, paragraphs (array of {text, position, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
+file_path, edits (array of {paragraph_index? | anchor?, new_text}), track_changes?, author?
 ```
 
-**`delete_paragraphs`** — Delete one or more paragraphs in one operation. Handles index reordering internally.
+**`insert_paragraphs`** — Insert one or more paragraphs in one operation. Place each by `position` (block index) or `anchor` + `placement` ("before"/"after"); returns the new paragraphs' anchors. A `\n` in `text` is a paragraph break (untracked: one paragraph per line; tracked: soft line break). When several paragraphs share the same `position`, they land in the document in the reverse of array order — list them back-to-front or use separate calls (anchor placement preserves array order).
 ```
-file_path, paragraph_indices, track_changes?, author?
+file_path, paragraphs (array of {text, position? | (anchor + placement), style?, num_id?, num_level?, copy_format_from?, copy_format_from_anchor?}), track_changes?, author?
+```
+
+**`delete_paragraphs`** — Delete one or more paragraphs or table blocks in one operation. Target by `paragraph_indices` (paragraph or table) and/or `anchors` (paragraph only).
+```
+file_path, paragraph_indices?, anchors?, track_changes?, author?
 ```
 
 ### Formatting
@@ -226,9 +241,9 @@ file_path, paragraph_indices, track_changes?, author?
 file_path, search, bold?, italic?, underline?, strikethrough?, highlight_color?, font_name?, font_size?, font_color?, case_sensitive?
 ```
 
-**`set_paragraph_formats`** — Apply alignment, spacing, indentation to one or more paragraphs in one operation. Each group bundles a list of paragraph indices with the formatting to apply to them.
+**`set_paragraph_formats`** — Apply alignment, spacing, indentation to one or more paragraphs in one operation. Each group targets paragraphs by `indices` and/or `anchors` and bundles the formatting to apply to them.
 ```
-file_path, groups (array of {indices, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
+file_path, groups (array of {indices?, anchors?, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
 ```
 
 **`highlight_text`** — Highlight matching text with a color.
@@ -236,9 +251,9 @@ file_path, groups (array of {indices, alignment?, space_before?, space_after?, l
 file_path, search, color?, case_sensitive?
 ```
 
-**`set_headings`** — Convert one or more paragraphs to headings (level 1-9) in one operation.
+**`set_headings`** — Convert one or more paragraphs to headings (level 1-9) in one operation. Target each by `paragraph_index` or `anchor`.
 ```
-file_path, headings (array of {paragraph_index, level})
+file_path, headings (array of {paragraph_index? | anchor?, level})
 ```
 
 ### Structure
@@ -386,7 +401,7 @@ The savings are especially large for **tracked changes**, **comments**, and **ru
 
 Simple read and paragraph-format operations see smaller savings (~63–76%) since python-docx has clean APIs for these.
 
-Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 39 tools) pays for itself in 3–5 operations.
+Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 40 tools) pays for itself in 3–5 operations.
 
 ## Requirements
 

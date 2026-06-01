@@ -112,6 +112,17 @@ import {
   type ListImagesResult,
   scanImages,
 } from "./engine/images.js";
+import {
+  type ParagraphLocation,
+  collectAllParaIds,
+  getDocumentRoot,
+  ensureW14Namespace,
+  directBodyParagraphLocations,
+  buildAnchorIndex,
+  resolveAnchor,
+  seedParagraphAnchor,
+  isValidParaId,
+} from "./engine/anchors.js";
 
 // ===========================================================================================
 // PUBLIC API
@@ -204,6 +215,190 @@ async function scanMaxIdAcrossParts(
 }
 
 // ---------------------------------------------------------------------------
+// Stable paragraph anchors (issue #7) — locator resolution + auto-seeding
+// ---------------------------------------------------------------------------
+
+/** A paragraph locator: exactly one of paragraphIndex / anchor. */
+export interface ParagraphLocator {
+  paragraphIndex?: number;
+  anchor?: string;
+}
+
+/**
+ * Resolve a locator (exactly one of paragraph_index / anchor) to a paragraph
+ * location. `anchorIndex` is built once per call via buildAnchorIndex(body).
+ */
+function locatorToLocation(
+  body: XNode[],
+  bodyIdxs: number[],
+  anchorIndex: Map<string, ParagraphLocation[]>,
+  loc: ParagraphLocator,
+): ParagraphLocation {
+  const hasIndex = loc.paragraphIndex !== undefined;
+  const hasAnchor = loc.anchor !== undefined && loc.anchor !== "";
+  if (hasIndex === hasAnchor) {
+    throw new EngineError(
+      ErrorCode.INVALID_LOCATOR,
+      `Provide exactly one of paragraph_index or anchor.`,
+    );
+  }
+  if (hasAnchor) {
+    return resolveAnchor(anchorIndex, loc.anchor as string);
+  }
+  const idx = loc.paragraphIndex as number;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= bodyIdxs.length) {
+    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${idx} out of range (0–${bodyIdxs.length - 1}).`);
+  }
+  const bodyIndex = bodyIdxs[idx];
+  const element = body[bodyIndex];
+  if (!element["w:p"]) {
+    throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${idx} is not a paragraph (it may be a table).`);
+  }
+  return { element, parent: body, bodyIndex, blockIndex: idx };
+}
+
+/**
+ * Lazy auto-seeder for the paragraphs a write touches or creates. Declares the
+ * w14 namespace on first use and assigns paraIds from a part-wide `used` set so
+ * new ids stay unique. Touched-only: untouched paragraphs are never seeded.
+ */
+class AnchorSeeder {
+  private used: Set<string> | null = null;
+  private nsReady = false;
+  constructor(private root: XNode, private body: XNode[]) {}
+
+  /** Ensure `element` has an anchor, returning it. */
+  seed(element: XNode): string {
+    if (!this.used) {
+      this.used = collectAllParaIds(this.body).all;
+    }
+    const existing = attr(element, "w14:paraId");
+    if (existing) return existing;
+    if (!this.nsReady) {
+      ensureW14Namespace(this.root);
+      this.nsReady = true;
+    }
+    return seedParagraphAnchor(element, this.used);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ensure_anchors
+// ---------------------------------------------------------------------------
+
+export interface AnchorBlockInfo {
+  index: number;
+  type: "paragraph" | "table";
+  anchor: string | null;
+  textPreview: string;
+}
+
+export interface EnsureAnchorsResult {
+  file: string;
+  seeded: number;
+  repaired: number;
+  blocks: AnchorBlockInfo[];
+}
+
+const ANCHOR_PREVIEW_LEN = 50;
+
+function anchorPreview(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > ANCHOR_PREVIEW_LEN ? oneLine.slice(0, ANCHOR_PREVIEW_LEN) + "…" : oneLine;
+}
+
+export async function ensureAnchorsStructured(filePath: string): Promise<EnsureAnchorsResult> {
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const root = getDocumentRoot(parsed);
+    const body = getBody(parsed);
+
+    const { all: used, duplicates } = collectAllParaIds(body);
+    let seeded = 0;
+    let repaired = 0;
+    let nsReady = false;
+    const ensureNs = (): void => {
+      if (!nsReady) {
+        ensureW14Namespace(root);
+        nsReady = true;
+      }
+    };
+
+    // Guarantee every direct-body paragraph ends with a valid, unique paraId not
+    // shared (case-insensitively) with any other <w:p> in the part. Reseed when
+    // the id is missing, invalid, part-wide-duplicated, or case-collides with an
+    // earlier body paragraph.
+    const assigned = new Set<string>(); // canonical (uppercase) ids
+    for (const loc of directBodyParagraphLocations(body)) {
+      const id = attr(loc.element, "w14:paraId");
+      const canonical = id?.toUpperCase();
+      const needsReseed =
+        !id ||
+        !isValidParaId(id) ||
+        duplicates.has(id) ||
+        (canonical !== undefined && assigned.has(canonical));
+      if (!needsReseed) {
+        assigned.add(canonical as string);
+        continue;
+      }
+      ensureNs();
+      const fresh = seedFreshAnchor(loc.element, used);
+      assigned.add(fresh);
+      if (id) repaired++;
+      else seeded++;
+    }
+
+    if (seeded > 0 || repaired > 0) {
+      serializeDocXml(handle, parsed);
+      await saveDocx(handle);
+    }
+
+    // Build the full block map (paragraphs + tables) for the result.
+    const blocks: AnchorBlockInfo[] = [];
+    const bodyIdxs = blockBodyIndices(body);
+    bodyIdxs.forEach((bi, index) => {
+      const el2 = body[bi];
+      if (el2["w:p"]) {
+        blocks.push({
+          index,
+          type: "paragraph",
+          anchor: attr(el2, "w14:paraId") ?? null,
+          textPreview: anchorPreview(extractParagraphText(el2["w:p"] as XNode[], false)),
+        });
+      } else {
+        blocks.push({
+          index,
+          type: "table",
+          anchor: null,
+          textPreview: anchorPreview(extractTableText(el2["w:tbl"] as XNode[], false)),
+        });
+      }
+    });
+
+    return { file: path.basename(filePath), seeded, repaired, blocks };
+  });
+}
+
+/** Assign a brand-new anchor to a paragraph, overwriting any existing id (duplicate repair). */
+function seedFreshAnchor(element: XNode, used: Set<string>): string {
+  // Remove the stale id from the element so seedParagraphAnchor assigns a new one.
+  if (element[":@"]) delete element[":@"]["@_w14:paraId"];
+  return seedParagraphAnchor(element, used);
+}
+
+export async function ensureAnchors(filePath: string): Promise<string> {
+  const r = await ensureAnchorsStructured(filePath);
+  let out = `Anchors in ${r.file}: seeded ${r.seeded}, repaired ${r.repaired}, ${r.blocks.length} block(s).\n\n`;
+  for (const b of r.blocks) {
+    const a = b.anchor ? `@${b.anchor}` : "(no anchor)";
+    out += `[${b.index}] ${a}${b.type === "table" ? " [table]" : ""} ${b.textPreview}\n`;
+  }
+  out += "\n<json>\n" + JSON.stringify(r) + "\n</json>";
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // 1. read_document
 // ---------------------------------------------------------------------------
 
@@ -212,11 +407,13 @@ export async function readDocument(
   startParagraph?: number,
   endParagraph?: number,
   showRevisions: boolean = false,
+  showAnchors: boolean = false,
 ): Promise<string> {
   const handle = await openDocx(filePath);
   const parsed = await parseDocXml(handle);
   const body = getBody(parsed);
   const blocks = enumerateBlocks(body, showRevisions);
+  const anchorByBlock = showAnchors ? buildAnchorByBlockIndex(body) : undefined;
 
   const start = startParagraph ?? 0;
   const end = endParagraph ?? blocks.length;
@@ -232,6 +429,10 @@ export async function readDocument(
 
   for (const b of filtered) {
     let prefix = `[${b.index}]`;
+    if (showAnchors) {
+      const a = anchorByBlock?.get(b.index);
+      if (a) prefix += ` @${a}`;
+    }
     if (b.headingLevel) {
       prefix += ` (H${b.headingLevel})`;
     } else if (b.style && b.style !== "Normal" && b.style !== "Table") {
@@ -354,7 +555,8 @@ export async function searchText(
       m.rowIndex !== undefined
         ? `[Block ${m.blockIndex} · cell ${m.rowIndex},${m.colIndex}]`
         : `[Block ${m.blockIndex}]`;
-    output += `${loc} ${m.context}\n`;
+    const a = m.anchor ? ` @${m.anchor}` : "";
+    output += `${loc}${a} ${m.context}\n`;
   }
 
   output += "\n\n<json>\n" + JSON.stringify(result) + "\n</json>";
@@ -375,6 +577,37 @@ export interface SearchMatch {
   rowIndex?: number;
   /** When the match is inside a table cell, the cell's zero-based column index. */
   colIndex?: number;
+  /** Stable anchor of the matched paragraph, when it is a direct-body paragraph
+   * that already carries a w14:paraId (table/SDT matches omit it). */
+  anchor?: string;
+}
+
+/**
+ * Map enumerateBlocks() block index → anchor, mirroring its walk (paragraph and
+ * table each advance the index; SDT-contained paragraphs advance it but are not
+ * anchorable in v1). Only direct-body paragraphs that already have a paraId are
+ * recorded, so a match's anchor is correct or absent — never mismatched.
+ */
+function buildAnchorByBlockIndex(body: XNode[]): Map<number, string> {
+  const map = new Map<number, string>();
+  let idx = 0;
+  for (const node of body) {
+    if (node["w:p"]) {
+      const a = attr(node, "w14:paraId");
+      if (a) map.set(idx, a);
+      idx++;
+    } else if (node["w:tbl"]) {
+      idx++;
+    } else if (node["w:sdt"]) {
+      const content = findOne(node["w:sdt"] as XNode[], "w:sdtContent");
+      if (content) {
+        for (const cc of content["w:sdtContent"] as XNode[]) {
+          if (cc["w:p"]) idx++;
+        }
+      }
+    }
+  }
+  return map;
 }
 
 /** searchTextStructured の戻り値型 */
@@ -434,13 +667,21 @@ export async function searchTextStructured(
   const matches: SearchMatch[] = [];
   let totalMatches = 0;
 
-  const tryMatchParagraph = (blockIndex: number, pChildren: XNode[]): void => {
+  // A direct-body paragraph match carries its anchor (when present); SDT/table
+  // matches omit it (those paragraphs aren't anchored in v1).
+  const tryMatchParagraph = (blockIndex: number, pChildren: XNode[], anchor?: string): void => {
     const text = extractParagraphText(pChildren, false);
     const compare = caseSensitive ? text : text.toLowerCase();
     const m = buildTextMatch(text, compare, searchStr, query.length);
     if (m) {
       totalMatches += m.occurrences;
-      matches.push({ blockIndex, occurrences: m.occurrences, context: m.context, fullText: text });
+      matches.push({
+        blockIndex,
+        occurrences: m.occurrences,
+        context: m.context,
+        fullText: text,
+        ...(anchor ? { anchor } : {}),
+      });
     }
   };
 
@@ -449,7 +690,7 @@ export async function searchTextStructured(
   let idx = 0;
   for (const child of body) {
     if (child["w:p"]) {
-      tryMatchParagraph(idx, child["w:p"] as XNode[]);
+      tryMatchParagraph(idx, child["w:p"] as XNode[], attr(child, "w14:paraId"));
       idx++;
     } else if (child["w:tbl"]) {
       const rows = findAll(child["w:tbl"] as XNode[], "w:tr");
@@ -1287,8 +1528,17 @@ function replaceCellContentUntracked(cellChildren: XNode[], newText: string): vo
 // ---------------------------------------------------------------------------
 
 export interface EditParagraphItem {
-  paragraphIndex: number;
+  /** Exactly one of paragraphIndex / anchor must be set. */
+  paragraphIndex?: number;
+  anchor?: string;
   newText: string;
+}
+
+/** Human-readable description of a locator for error messages. */
+function describeLocator(loc: ParagraphLocator): string {
+  return loc.anchor !== undefined && loc.anchor !== ""
+    ? `anchor "${loc.anchor}"`
+    : `at index ${loc.paragraphIndex}`;
 }
 
 export async function editParagraphs(
@@ -1304,25 +1554,21 @@ export async function editParagraphs(
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
+    const root = getDocumentRoot(parsed);
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
+    const anchorIndex = buildAnchorIndex(body);
 
-    // Validate all indices upfront and capture element references. References
-    // (not indices) are held because an untracked multi-line edit splices new
-    // sibling paragraphs into the body, shifting the indices of later targets.
+    // Resolve and validate every locator (index or anchor) upfront. Element
+    // references (not indices) are held because an untracked multi-line edit
+    // splices new sibling paragraphs into the body, shifting later indices.
     const targets: XNode[] = [];
     for (const edit of edits) {
-      if (edit.paragraphIndex < 0 || edit.paragraphIndex >= bodyIdxs.length) {
-        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${edit.paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
+      const loc = locatorToLocation(body, bodyIdxs, anchorIndex, edit);
+      if (trackChanges && paragraphHasRevisions(loc.element["w:p"] as XNode[])) {
+        throwPendingRevisions(`Paragraph ${describeLocator(edit)}`);
       }
-      const element = body[bodyIdxs[edit.paragraphIndex]];
-      if (!element["w:p"]) {
-        throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${edit.paragraphIndex} is not a paragraph (it may be a table).`);
-      }
-      if (trackChanges && paragraphHasRevisions(element["w:p"] as XNode[])) {
-        throwPendingRevisions(`Paragraph at index ${edit.paragraphIndex}`);
-      }
-      targets.push(element);
+      targets.push(loc.element);
     }
 
     const ctx = trackChanges
@@ -1331,14 +1577,15 @@ export async function editParagraphs(
 
     // Collapse duplicate edits to the same paragraph (last-write-wins). An
     // untracked multi-line edit splices the original element out of the body,
-    // so a second edit holding the same now-detached reference would be lost;
-    // applying once with the final text preserves the previous in-place
-    // last-write-wins behaviour and avoids mutating a detached node.
+    // so applying once with the final text avoids mutating a detached node.
+    // Seed the touched paragraph's anchor before the (possibly splitting) edit.
+    const seeder = new AnchorSeeder(root, body);
     const finalText = new Map<XNode, string>();
     for (let i = 0; i < edits.length; i++) {
       finalText.set(targets[i], edits[i].newText);
     }
     for (const [element, newText] of finalText) {
+      seeder.seed(element); // touched-paragraph auto-seed (kept by in-place single-line edits)
       replaceParagraphTextMultiline(body, element, newText, ctx);
     }
 
@@ -1346,7 +1593,7 @@ export async function editParagraphs(
     await saveDocx(handle);
 
     const mode = trackChanges ? " (tracked)" : "";
-    return `Updated ${edits.length} paragraph(s) in ${path.basename(filePath)}${mode}.`;
+    return `Updated ${finalText.size} paragraph(s) in ${path.basename(filePath)}${mode}.`;
   });
 }
 
@@ -1573,11 +1820,139 @@ function resolveInsertOpts(
 
 export interface InsertParagraphItem {
   text: string;
-  position: number;
+  /** Index placement: insert before this block index (-1/out-of-range appends). */
+  position?: number;
+  /** Anchor placement: insert before/after the paragraph with this anchor. */
+  anchor?: string;
+  placement?: "before" | "after";
   style?: string;
   numId?: number;
   numLevel?: number;
   copyFormatFrom?: number;
+  /** Alternative to copyFormatFrom: copy pPr from the paragraph with this anchor. */
+  copyFormatFromAnchor?: string;
+}
+
+/** Resolve build options for one insert item (index or anchor copy_format source). */
+function resolveInsertOptsForItem(
+  body: XNode[],
+  bodyIdxs: number[],
+  anchorIndex: Map<string, ParagraphLocation[]>,
+  item: InsertParagraphItem,
+): BuildParagraphOptions | undefined {
+  if (item.copyFormatFromAnchor !== undefined && item.copyFormatFromAnchor !== "") {
+    const srcEl = resolveAnchor(anchorIndex, item.copyFormatFromAnchor).element;
+    const pPr = findOne(srcEl["w:p"] as XNode[], "w:pPr");
+    return pPr ? { sourcePPr: pPr } : undefined;
+  }
+  return resolveInsertOpts(body, bodyIdxs, item.numId, item.numLevel, item.copyFormatFrom);
+}
+
+export interface InsertParagraphsResult {
+  file: string;
+  inserted: number;
+  /** Each inserted paragraph paired with its freshly assigned anchor, in input order. */
+  newParagraphs: { text: string; anchor: string }[];
+}
+
+export async function insertParagraphsStructured(
+  filePath: string,
+  items: InsertParagraphItem[],
+  trackChanges: boolean = true,
+  author: string = "Claude",
+): Promise<InsertParagraphsResult> {
+  if (items.length === 0) {
+    return { file: path.basename(filePath), inserted: 0, newParagraphs: [] };
+  }
+
+  return withFileLock(filePath, async () => {
+    const handle = await openDocx(filePath);
+    const parsed = await parseDocXml(handle);
+    const root = getDocumentRoot(parsed);
+    const body = getBody(parsed);
+    const bodyIdxsForResolve = blockBodyIndices(body);
+    const anchorIndex = buildAnchorIndex(body);
+
+    // Validate the locator on every item and resolve its anchor target / opts
+    // up-front (against the original doc, before any splice).
+    const anchorTarget = new Map<InsertParagraphItem, XNode>();
+    const resolvedOpts = new Map<InsertParagraphItem, BuildParagraphOptions | undefined>();
+    for (const item of items) {
+      const hasPos = item.position !== undefined;
+      const hasAnchor = item.anchor !== undefined && item.anchor !== "";
+      if (hasPos === hasAnchor) {
+        throw new EngineError(
+          ErrorCode.INVALID_LOCATOR,
+          `Each insert must specify exactly one of position or anchor.`,
+        );
+      }
+      if (hasAnchor) {
+        if (item.placement !== "before" && item.placement !== "after") {
+          throw new EngineError(ErrorCode.INVALID_PARAMETER, `Anchor placement must be "before" or "after".`);
+        }
+        anchorTarget.set(item, resolveAnchor(anchorIndex, item.anchor as string).element);
+      }
+      resolvedOpts.set(item, resolveInsertOptsForItem(body, bodyIdxsForResolve, anchorIndex, item));
+    }
+
+    const ctx = trackChanges
+      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
+      : null;
+
+    const seeder = new AnchorSeeder(root, body);
+    const newParagraphs: { item: InsertParagraphItem; element: XNode }[] = [];
+
+    // Position-based items keep the existing descending-by-position behaviour
+    // (so same-position items follow the documented reverse-of-array order).
+    const positionItems = items.filter((i) => i.position !== undefined);
+    const sorted = [...positionItems].sort((a, b) => {
+      const posA = a.position! < 0 || a.position! >= bodyIdxsForResolve.length ? Infinity : a.position!;
+      const posB = b.position! < 0 || b.position! >= bodyIdxsForResolve.length ? Infinity : b.position!;
+      return posB - posA;
+    });
+    // buildNewParagraph returns one or more <w:p> (untracked multi-line input
+    // splits on "\n"); the first is the representative element for the returned
+    // anchor.
+    for (const item of sorted) {
+      const newParas = buildNewParagraph(item.text, item.style, ctx, resolvedOpts.get(item));
+      const currentBodyIdxs = blockBodyIndices(body);
+      spliceNewParagraph(body, currentBodyIdxs, item.position as number, newParas);
+      newParagraphs.push({ item, element: newParas[0] });
+    }
+
+    // Anchor-based items splice relative to their (stable) target element, in
+    // input order. For repeated "after" inserts against the same anchor, an
+    // after-cursor advances past each newly inserted paragraph so they keep
+    // array order rather than reversing.
+    const afterCursor = new Map<XNode, XNode>();
+    for (const item of items) {
+      if (item.position !== undefined) continue;
+      const target = anchorTarget.get(item) as XNode;
+      const newParas = buildNewParagraph(item.text, item.style, ctx, resolvedOpts.get(item));
+      let insertAt: number;
+      if (item.placement === "after") {
+        const ref = afterCursor.get(target) ?? target;
+        insertAt = body.indexOf(ref) + 1;
+        afterCursor.set(target, newParas[newParas.length - 1]);
+      } else {
+        insertAt = body.indexOf(target);
+      }
+      body.splice(insertAt, 0, ...newParas);
+      newParagraphs.push({ item, element: newParas[0] });
+    }
+
+    // Seed each new paragraph so the caller gets its anchor back.
+    const reported: { text: string; anchor: string }[] = [];
+    for (const item of items) {
+      const entry = newParagraphs.find((np) => np.item === item);
+      if (entry) reported.push({ text: item.text, anchor: seeder.seed(entry.element) });
+    }
+
+    serializeDocXml(handle, parsed);
+    await saveDocx(handle);
+
+    return { file: path.basename(filePath), inserted: items.length, newParagraphs: reported };
+  });
 }
 
 export async function insertParagraphs(
@@ -1586,50 +1961,14 @@ export async function insertParagraphs(
   trackChanges: boolean = true,
   author: string = "Claude",
 ): Promise<string> {
-  if (items.length === 0) {
-    return `No paragraphs to insert.`;
+  const r = await insertParagraphsStructured(filePath, items, trackChanges, author);
+  if (r.inserted === 0) return `No paragraphs to insert.`;
+  const mode = trackChanges ? " (tracked)" : "";
+  let out = `Inserted ${r.inserted} paragraph(s) in ${r.file}${mode}.`;
+  if (r.newParagraphs.length > 0) {
+    out += "\n\n<json>\n" + JSON.stringify({ newParagraphs: r.newParagraphs }) + "\n</json>";
   }
-
-  return withFileLock(filePath, async () => {
-    const handle = await openDocx(filePath);
-    const parsed = await parseDocXml(handle);
-    const body = getBody(parsed);
-
-    const ctx = trackChanges
-      ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
-      : null;
-
-    // Sort by position descending so higher-index inserts don't shift lower ones.
-    // Append-position items (position < 0 or out of range) sort to the front
-    // so they are processed before specific-position items.
-    const bodyIdxsForSort = blockBodyIndices(body);
-    const sorted = [...items].sort((a, b) => {
-      const posA = a.position < 0 || a.position >= bodyIdxsForSort.length ? Infinity : a.position;
-      const posB = b.position < 0 || b.position >= bodyIdxsForSort.length ? Infinity : b.position;
-      if (posA === posB) return 0;
-      return posB - posA;
-    });
-
-    // Resolve copy_format_from before any inserts (indices refer to original document)
-    const resolvedOpts = new Map<InsertParagraphItem, BuildParagraphOptions | undefined>();
-    for (const item of sorted) {
-      const opts = resolveInsertOpts(body, bodyIdxsForSort, item.numId, item.numLevel, item.copyFormatFrom);
-      resolvedOpts.set(item, opts);
-    }
-
-    for (const item of sorted) {
-      const newParas = buildNewParagraph(item.text, item.style, ctx, resolvedOpts.get(item));
-      // Recalculate indices after each splice to avoid stale mapping
-      const currentBodyIdxs = blockBodyIndices(body);
-      spliceNewParagraph(body, currentBodyIdxs, item.position, newParas);
-    }
-
-    serializeDocXml(handle, parsed);
-    await saveDocx(handle);
-
-    const mode = trackChanges ? " (tracked)" : "";
-    return `Inserted ${items.length} paragraph(s) in ${path.basename(filePath)}${mode}.`;
-  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,51 +2051,60 @@ export async function deleteParagraphs(
   paragraphIndices: number[],
   trackChanges: boolean = true,
   author: string = "Claude",
+  anchors: string[] = [],
 ): Promise<string> {
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
+    const anchorIndex = buildAnchorIndex(body);
 
-    // Deduplicate indices upfront
-    const unique = [...new Set(paragraphIndices)];
-
-    // Validate all indices
-    for (const idx of unique) {
-      if (idx < 0 || idx >= bodyIdxs.length) {
+    // Resolve a deduplicated set of target elements. An index can target a
+    // paragraph OR a table block; an anchor only ever targets a paragraph
+    // (tables have no paraId). Resolution by reference makes deletion
+    // order-independent.
+    const targets = new Set<XNode>();
+    for (const idx of paragraphIndices) {
+      if (!Number.isInteger(idx) || idx < 0 || idx >= bodyIdxs.length) {
         throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${idx} out of range (0–${bodyIdxs.length - 1}).`);
       }
+      targets.add(body[bodyIdxs[idx]]);
+    }
+    for (const anchor of anchors) {
+      targets.add(resolveAnchor(anchorIndex, anchor).element);
+    }
+
+    const elements = [...targets];
+    if (elements.length === 0) {
+      return `No paragraphs to delete.`;
     }
 
     if (trackChanges) {
-      // Reject if any targeted paragraph already has tracked-change markup.
-      // Tables are checked cell-by-cell. Paragraph-mark deletion via
-      // pPr > rPr > w:del also counts.
-      for (const idx of unique) {
-        const element = body[bodyIdxs[idx]];
+      // Reject if any targeted block already has tracked-change markup.
+      for (const element of elements) {
         if (element["w:p"] && paragraphHasRevisions(element["w:p"] as XNode[])) {
-          throwPendingRevisions(`Block at index ${idx}`);
+          throwPendingRevisions(`Targeted paragraph`);
         } else if (element["w:tbl"]) {
           let conflict = false;
           forEachParagraphInTable(element["w:tbl"], (pChildren) => {
             if (paragraphHasRevisions(pChildren)) conflict = true;
           });
-          if (conflict) throwPendingRevisions(`Table at index ${idx}`);
+          if (conflict) throwPendingRevisions(`Targeted table`);
         }
       }
 
       const maxId = await scanMaxIdAcrossParts(handle, parsed);
       const ctx = newRevisionContext(maxId + 1, author);
 
-      for (const idx of unique) {
-        markBlockAsDeleted(body[bodyIdxs[idx]], ctx);
+      for (const element of elements) {
+        markBlockAsDeleted(element, ctx);
       }
     } else {
-      // Hard delete: sort descending to avoid index shifting
-      const sorted = unique.sort((a, b) => b - a);
-      for (const idx of sorted) {
-        body.splice(bodyIdxs[idx], 1);
+      // Hard delete by reference (order-independent).
+      for (const element of elements) {
+        const i = body.indexOf(element);
+        if (i !== -1) body.splice(i, 1);
       }
     }
 
@@ -1764,7 +2112,7 @@ export async function deleteParagraphs(
     await saveDocx(handle);
 
     const mode = trackChanges ? " (tracked)" : "";
-    return `Deleted ${unique.length} block(s) from ${path.basename(filePath)}${mode}.`;
+    return `Deleted ${elements.length} block(s) from ${path.basename(filePath)}${mode}.`;
   });
 }
 
@@ -1821,34 +2169,40 @@ export async function formatText(
 
 export async function setParagraphFormats(
   filePath: string,
-  groups: Array<{ indices: number[]; format: ParagraphFormat }>,
+  groups: Array<{ indices?: number[]; anchors?: string[]; format: ParagraphFormat }>,
 ): Promise<string> {
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
+    const root = getDocumentRoot(parsed);
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
+    const anchorIndex = buildAnchorIndex(body);
 
-    // Validate all indices upfront
+    // Resolve each group's targets (indices and/or anchors) upfront.
+    const resolved: { elements: XNode[]; format: ParagraphFormat }[] = [];
     let totalCount = 0;
     for (const group of groups) {
-      for (const idx of group.indices) {
-        if (idx < 0 || idx >= bodyIdxs.length) {
-          throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${idx} out of range (0–${bodyIdxs.length - 1}).`);
-        }
-        const element = body[bodyIdxs[idx]];
-        if (!element["w:p"]) {
-          throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${idx} is not a paragraph.`);
-        }
-        totalCount++;
+      const elements: XNode[] = [];
+      for (const idx of group.indices ?? []) {
+        elements.push(locatorToLocation(body, bodyIdxs, anchorIndex, { paragraphIndex: idx }).element);
       }
+      for (const anchor of group.anchors ?? []) {
+        elements.push(resolveAnchor(anchorIndex, anchor).element);
+      }
+      if (elements.length === 0) {
+        throw new EngineError(ErrorCode.INVALID_LOCATOR, `Each group must specify at least one of indices or anchors.`);
+      }
+      resolved.push({ elements, format: group.format });
+      totalCount += elements.length;
     }
 
-    // Apply formatting
-    for (const group of groups) {
-      for (const idx of group.indices) {
-        const element = body[bodyIdxs[idx]];
-        applyParagraphFormat(element["w:p"], group.format);
+    // Apply formatting and auto-seed the touched paragraphs.
+    const seeder = new AnchorSeeder(root, body);
+    for (const { elements, format } of resolved) {
+      for (const element of elements) {
+        applyParagraphFormat(element["w:p"], format);
+        seeder.seed(element);
       }
     }
 
@@ -2825,7 +3179,9 @@ function applyHeadingLevel(pChildren: XNode[], level: number): void {
 // ---------------------------------------------------------------------------
 
 export interface SetHeadingItem {
-  paragraphIndex: number;
+  /** Exactly one of paragraphIndex / anchor must be set. */
+  paragraphIndex?: number;
+  anchor?: string;
   level: number;
 }
 
@@ -2847,23 +3203,21 @@ export async function setHeadings(
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
+    const root = getDocumentRoot(parsed);
     const body = getBody(parsed);
     const bodyIdxs = blockBodyIndices(body);
+    const anchorIndex = buildAnchorIndex(body);
 
-    // Validate all indices upfront
-    for (const item of items) {
-      if (item.paragraphIndex < 0 || item.paragraphIndex >= bodyIdxs.length) {
-        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${item.paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
-      }
-      const element = body[bodyIdxs[item.paragraphIndex]];
-      if (!element["w:p"]) {
-        throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${item.paragraphIndex} is not a paragraph.`);
-      }
-    }
+    // Resolve every locator (index or anchor) upfront.
+    const targets: XNode[] = items.map(
+      (item) => locatorToLocation(body, bodyIdxs, anchorIndex, item).element,
+    );
 
-    for (const item of items) {
-      applyHeadingLevel(body[bodyIdxs[item.paragraphIndex]]["w:p"] as XNode[], item.level);
-    }
+    const seeder = new AnchorSeeder(root, body);
+    targets.forEach((element, i) => {
+      applyHeadingLevel(element["w:p"] as XNode[], items[i].level);
+      seeder.seed(element);
+    });
 
     serializeDocXml(handle, parsed);
     await saveDocx(handle);

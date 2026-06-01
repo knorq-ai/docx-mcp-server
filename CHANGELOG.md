@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] — 2026-06-01
+
+### Added
+- **Stable paragraph anchors** (`w14:paraId`) so addressing survives the index shifts caused by insert/delete.
+  - `ensure_anchors` tool — assigns a valid, unique anchor to every top-level paragraph that lacks one (repairing missing / invalid / duplicate ids and declaring the `w14`/`mc` namespaces), and returns the full index→anchor map. Idempotent.
+  - `read_document` gains `show_anchors`; `search_text` reports each match's `anchor`.
+  - The paragraph edit tools accept an anchor as an alternative to the integer index: `edit_paragraphs` / `set_headings` (`anchor`), `set_paragraph_formats` (`anchors` per group), `delete_paragraphs` (`anchors`, alongside `paragraph_indices`), `insert_paragraphs` (`anchor` + `placement: before|after`, and `copy_format_from_anchor`). `insert_paragraphs` returns the new paragraphs' anchors.
+  - Editing auto-assigns an anchor to each touched / inserted paragraph (touched-only; untouched paragraphs are never seeded), so a document becomes anchor-addressable as you edit it without a separate `ensure_anchors` pass.
+  - v1 scope: direct-body paragraphs only. Paragraphs inside tables / content controls (`w:sdt`) are not anchored; a table block is reported with a `null` anchor.
+- New error codes `AMBIGUOUS_ANCHOR` (anchor matches more than one paragraph) and `INVALID_LOCATOR` (an item supplied both, or neither, of index/anchor).
+
+### Fixed
+- `copy_format_from` (in `insert_paragraphs`) no longer carries the source paragraph's stale tracked-change metadata (`w:pPrChange`, `pPr > rPr > w:rPrChange`) onto the new paragraph.
+
 ## [3.4.0] — 2026-06-01
 
 ### Added
