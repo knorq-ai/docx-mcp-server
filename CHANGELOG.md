@@ -5,53 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.5.0] — 2026-06-01
+## [3.2.0] — 2026-06-08
+
+Consolidates four feature tracks (issues #4, #5, #6, #7) plus a multi-agent QA
+hardening pass into a single release. Adds 7 tools (**34 total**). All changes
+are additive or bug fixes; documents without top-level content controls (`w:sdt`)
+are unaffected by the block-index change noted under Changed.
 
 ### Added
-- **Stable paragraph anchors** (`w14:paraId`) so addressing survives the index shifts caused by insert/delete.
-  - `ensure_anchors` tool — assigns a valid, unique anchor to every top-level paragraph that lacks one (repairing missing / invalid / duplicate ids and declaring the `w14`/`mc` namespaces), and returns the full index→anchor map. Idempotent.
-  - `read_document` gains `show_anchors`; `search_text` reports each match's `anchor`.
-  - The paragraph edit tools accept an anchor as an alternative to the integer index: `edit_paragraphs` / `set_headings` (`anchor`), `set_paragraph_formats` (`anchors` per group), `delete_paragraphs` (`anchors`, alongside `paragraph_indices`), `insert_paragraphs` (`anchor` + `placement: before|after`, and `copy_format_from_anchor`). `insert_paragraphs` returns the new paragraphs' anchors.
-  - Editing auto-assigns an anchor to each touched / inserted paragraph (touched-only; untouched paragraphs are never seeded), so a document becomes anchor-addressable as you edit it without a separate `ensure_anchors` pass.
-  - v1 scope: direct-body paragraphs only. Paragraphs inside tables / content controls (`w:sdt`) are not anchored; a table block is reported with a `null` anchor.
-- New error codes `AMBIGUOUS_ANCHOR` (anchor matches more than one paragraph) and `INVALID_LOCATOR` (an item supplied both, or neither, of index/anchor).
-
-### Fixed
-- `copy_format_from` (in `insert_paragraphs`) no longer carries the source paragraph's stale tracked-change metadata (`w:pPrChange`, `pPr > rPr > w:rPrChange`) onto the new paragraph.
-
-## [3.4.0] — 2026-06-01
-
-### Added
-- Per-paragraph table cell editing — address an individual `<w:p>` inside a `<w:tc>` by a cell-local paragraph index (counting only the cell's paragraphs; row/column are physical `w:tc` positions). Closes the last gap that previously forced raw-XML edits for table-heavy documents:
-  - `edit_table_paragraphs` — edit one paragraph of a multi-paragraph cell without replacing the whole cell.
-  - `delete_table_paragraphs` — delete one paragraph of a cell; if it was the cell's last paragraph, a blank one is kept so the cell stays valid. Real Word (`w:numPr`) numbering renumbers the rest automatically.
-  - `insert_table_paragraphs` — insert a paragraph at a cell-local position (`-1`/out-of-range appends). Supports `num_id`/`num_level` and `copy_format_from` (a paragraph index within the same cell). Multiple inserts into the same cell keep array order.
-  - All three support tracked changes (default) and the `allow_untracked_edit` safety flag, and refuse (tracked mode) paragraphs that already contain revision markup.
-
-### Fixed
-- `copy_format_from` (in `insert_paragraphs` and the new `insert_table_paragraphs`) no longer carries the source paragraph's stale tracked-change metadata (`w:pPrChange`, `pPr > rPr > w:rPrChange`) onto the newly inserted paragraph, where accept/reject could otherwise treat it as a live revision.
-
-## [3.3.0] — 2026-06-01
-
-### Added
-- `read_table_structure` tool — inspect a table without reading the whole document. Returns row/column dimensions and a short preview of every cell, plus each cell's horizontal merge span (`gridSpan`) and vertical merge state (`vMerge`). Indices are physical `w:tc` positions, matching `read_table_cell` / `edit_table_cells`.
-- `read_table_cell` tool — read a single cell's paragraphs (text + style/alignment/numbering) and merge info, without reading the whole document.
-- `get_paragraph_format` tool — introspect a paragraph's formatting: style, heading level, alignment, numbering (`numId`/level), indentation (twips) and spacing (points). Pairs with `set_paragraph_formats` (same units) and helps choose an `insert_paragraphs` `copy_format_from` source or debug formatting differences.
+- **Per-paragraph table-cell editing (#5):** `edit_table_paragraphs`, `delete_table_paragraphs`, `insert_table_paragraphs` — address an individual `<w:p>` inside a `<w:tc>` by a cell-local paragraph index (row/column are physical `w:tc` positions). Deleting a cell's last paragraph keeps a blank one so the cell stays valid; `insert_table_paragraphs` supports `num_id`/`num_level` and same-cell `copy_format_from`. All three honour tracked changes (default) + the `allow_untracked_edit` flag and refuse (tracked) paragraphs with pending revisions.
+- **Table / paragraph introspection (#6):** `read_table_structure` (row/col dimensions, per-cell preview, `gridSpan`/`vMerge`), `read_table_cell` (one cell's paragraphs + merge info), and `get_paragraph_format` (style, heading level, alignment, numbering, indentation in twips, spacing in points — same units `set_paragraph_formats` accepts).
+- **Stable paragraph anchors (#7):** `ensure_anchors` (`w14:paraId`) assigns a valid, unique anchor to every top-level paragraph lacking one (repairing missing/invalid/duplicate ids, declaring the `w14`/`mc` namespaces) and returns the index→anchor map (idempotent). `read_document` gains `show_anchors`; `search_text` reports each match's `anchor`; the paragraph edit tools accept an `anchor` (or `anchors`) as an alternative to the integer index, and `insert_paragraphs` accepts `anchor` + `placement: before|after` / `copy_format_from_anchor` and returns the new anchors. Editing auto-seeds anchors on touched paragraphs. v1 scope: direct-body paragraphs only (table / `w:sdt` paragraphs report a `null` anchor).
+- New error codes `AMBIGUOUS_ANCHOR` and `INVALID_LOCATOR`.
 
 ### Changed
-- `search_text` now descends into tables: a match inside a table is reported per cell with `rowIndex` / `colIndex` (instead of a single block-level match against the flattened table text), so results can drive `edit_table_cells` directly. Plain paragraph matches are unchanged and leave `rowIndex` / `colIndex` undefined.
-
-## [3.2.0] — 2026-06-01
+- **`\n` is a paragraph break (#4)** across `edit_paragraphs`, `edit_table_cells`, `insert_paragraphs`: **untracked** edits/inserts split on `\n` into separate `<w:p>` (each inheriting the source `pPr` — numbering, hanging indent, alignment — and first-run `rPr`); **tracked** edits/inserts render `\n` as a `<w:br/>` soft break (a tracked paragraph-mark insertion does not round-trip through `accept_all_changes` / `reject_all_changes`). `replace_texts` and untracked `edit_table_paragraphs` likewise render `\n` as a soft break, and CRLF / lone CR is normalized to `\n`. An untracked multi-line edit grows the block count — re-read or use anchors / `search_text` to re-locate targets.
+- **`edit_table_cells` (untracked) replaces the whole cell** rather than only its first paragraph, preserving `w:tcPr` and nested block content; re-editing a multi-paragraph cell leaves no residue.
+- **Unified block-index space (#6/#7):** `read_document`, `search_text`, `get_document_info`, and every index-consuming edit/table/format/anchor tool now share ONE block numbering (descending into a top-level `w:sdt`). For a document **with** a top-level content control this changes the indices those tools accept so they finally agree with what `read_document`/`search_text` report — previously they could silently target the wrong block. Documents without content controls are unaffected. Inserting/deleting a paragraph whose index falls inside a `w:sdt` is refused with `INVALID_LOCATOR` (edit it in place by index/anchor).
 
 ### Fixed
-- `edit_paragraphs` and `edit_table_cells` no longer write a literal `\n` into a single `<w:t>` run (which Word rendered as one continuous wrapped line). A `\n` in `new_text` is now treated as a paragraph break.
-
-### Changed
-- Newline (`\n`) semantics for editing/insertion tools are now explicit and uniform:
-  - **Untracked** edits/inserts split on `\n` into separate `<w:p>` paragraphs. Each paragraph inherits the source paragraph's `pPr` (numbering, hanging indent, alignment) and first-run `rPr`, so manual numbered lists and multi-line cells render correctly instead of inheriting the hanging indent only on the first line. Affects `edit_paragraphs`, `edit_table_cells`, `insert_paragraphs`.
-  - **Tracked** edits/inserts keep a single paragraph and render `\n` as a soft line break (`<w:br/>`) inside the inserted run, because inserting a paragraph mark as a tracked change does not round-trip cleanly through `accept_all_changes` / `reject_all_changes`.
-- `edit_table_cells` (untracked) now replaces the **entire cell** rather than only its first paragraph. Re-editing a multi-paragraph cell (e.g. a numbered list produced by an earlier split) no longer leaves stale lines behind. `w:tcPr` and nested tables are preserved. Tracked-mode cell edits are unchanged (first-paragraph diff replace).
-  - Note: because an untracked multi-line `edit_paragraphs` increases the paragraph count, the indices of later blocks shift — re-read or use `search_text` to re-locate targets after such an edit.
+- **Illegal XML control characters** (U+0000–08, 0B, 0C, 0E–1F) in text are stripped instead of silently producing a corrupt `.docx` that Word / strict readers reject.
+- **Empty search queries** no longer hang the (single-threaded) server or spin to a `RangeError` — `search_text` / `format_text` / `highlight_text` reject empty input.
+- **`insert_table`** now emits the required `<w:tblGrid>`, and a table cell never ends in a nested `<w:tbl>` (a trailing paragraph is kept) — both previously failed strict OOXML validators such as python-docx.
+- **`reject_all_changes`** removes a rejected tracked-inserted paragraph entirely (no residual empty paragraph), keeping a blank one only where a cell/body would otherwise be left with none.
+- **Structured `<json>` responses** are delimiter-safe (document text containing `</json>` no longer breaks extraction); zero-result reads still emit a `<json>` block; `get_paragraph_format` JSON includes explicit `alignment` / `style` / `headingLevel` defaults.
+- **Index validation:** non-integer / wrong-type indices are rejected with `INDEX_OUT_OF_RANGE` everywhere (no raw `TypeError`; no silent string-coercion that mutated the wrong cell).
+- **`copy_format_from`** (in `insert_paragraphs` and the table-paragraph tools) no longer carries the source paragraph's stale tracked-change metadata (`w:pPrChange` / `pPr > rPr > w:rPrChange`) onto the new paragraph.
+- `ensure_anchors` block indices now match `read_document` / `search_text`.
 
 ## [3.1.0] — 2026-05-03
 

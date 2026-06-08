@@ -4,7 +4,7 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**40 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**34 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
@@ -401,7 +401,7 @@ The savings are especially large for **tracked changes**, **comments**, and **ru
 
 Simple read and paragraph-format operations see smaller savings (~63–76%) since python-docx has clean APIs for these.
 
-Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 40 tools) pays for itself in 3–5 operations.
+Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 34 tools) pays for itself in 3–5 operations.
 
 ## Requirements
 
