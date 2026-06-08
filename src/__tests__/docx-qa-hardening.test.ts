@@ -21,6 +21,7 @@ import {
   createDocWithSdt,
   cleanupTmpFiles,
   readRawDocXml,
+  readRawCommentsXml,
   tmpDocxPath,
   trackTmpFile,
   writeMinimalDocx,
@@ -50,6 +51,8 @@ import {
   rejectAllChanges,
   listImages,
   readComments,
+  addComment,
+  addComments,
   EngineError,
   ErrorCode,
   formatText,
@@ -1235,6 +1238,283 @@ describe("sanitizer strips noncharacters and lone surrogates, keeps astral pairs
     expect(/\u{1F600}/u.test(inner)).toBe(true);
     expect(inner).toContain("Z");
     expect(/[\uD800-\uDFFF]/.test(inner.replace(/\u{1F600}/u, ""))).toBe(false);
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});
+
+// =========================================================================
+// CODEX FINAL-GATE FINDINGS (F1–F4)
+// =========================================================================
+
+// -------------------------------------------------------------------------
+// F1 [HIGH] — user-controlled strings that flow into XML ATTRIBUTE values
+// (w:author, w:pStyle/@w:val, font names, colors, comment author) must be
+// sanitized too. C2 only covered TEXT nodes; a control char or lone surrogate
+// in an attribute value was written raw → malformed document.xml/comments.xml.
+// Fix: sanitize STRING attribute values at the setAttr()/el() chokepoints.
+// -------------------------------------------------------------------------
+describe("F1: XML attribute values are sanitized (control chars + lone surrogates)", () => {
+  const NUL = String.fromCharCode(0x00); // C0 NUL — XML-illegal
+  const FF = String.fromCharCode(0x0c); // U+000C form feed — XML-illegal
+  const HI = "\uD800"; // lone high surrogate — XML-illegal
+
+  it("editParagraphs author with a control char + lone surrogate → well-formed, openable", async () => {
+    const p = await createTmpDoc("seed");
+    await editParagraphs(
+      p,
+      [{ paragraphIndex: 0, newText: "world" }],
+      true,
+      "auth" + NUL + "o" + FF + "r" + HI,
+    );
+    const xml = await readRawDocXml(p);
+    // No raw illegal codepoint survives in the w:author attribute (or anywhere).
+    expect(xml).not.toContain(NUL);
+    expect(xml).not.toContain(FF);
+    expect(/[\uD800-\uDFFF]/.test(xml)).toBe(false);
+    // The clean part of the author name is intact.
+    expect(xml).toContain('w:author="author"');
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("addComment author with a control char + lone surrogate → comments.xml well-formed", async () => {
+    const p = await createTmpDoc("anchor here please");
+    await addComment(p, "anchor", "a note", "rev" + NUL + "ie" + FF + "wer" + HI);
+    const cxml = await readRawCommentsXml(p);
+    expect(cxml).not.toContain(NUL);
+    expect(cxml).not.toContain(FF);
+    expect(/[\uD800-\uDFFF]/.test(cxml)).toBe(false);
+    expect(cxml).toContain('w:author="reviewer"');
+    // Both document.xml and comments.xml must be well-formed and the file opens.
+    expect(xmlIsWellFormed(p)).toBe(true);
+    // comments.xml well-formed too.
+    execFileSync("bash", ["-c", `unzip -p "${p}" word/comments.xml | xmllint --noout -`]);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("formatText font_name with a control char + lone surrogate → well-formed, openable", async () => {
+    const p = await createTmpDoc("style this word");
+    await formatText(p, "word", { fontName: "Ari" + NUL + "a" + FF + "l" + HI });
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain(NUL);
+    expect(xml).not.toContain(FF);
+    expect(/[\uD800-\uDFFF]/.test(xml)).toBe(false);
+    // The rFonts attributes carry the cleaned font name.
+    expect(xml).toContain('w:ascii="Arial"');
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("a normal author with an emoji (astral surrogate PAIR) survives intact", async () => {
+    const p = await createTmpDoc("seed para");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "edited" }], true, "Rev \u{1F600} iewer");
+    const xml = await readRawDocXml(p);
+    // The emoji (valid pair) is preserved in the attribute value.
+    expect(/\u{1F600}/u.test(xml)).toBe(true);
+    expect(xml).toContain("Rev \u{1F600} iewer");
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("a normal font name with an emoji survives intact in rFonts", async () => {
+    const p = await createTmpDoc("font me");
+    await formatText(p, "font", { fontName: "Emoji\u{1F600}Font" });
+    const xml = await readRawDocXml(p);
+    expect(/\u{1F600}/u.test(xml)).toBe(true);
+    expect(xml).toContain('w:ascii="Emoji\u{1F600}Font"');
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// F2 [MEDIUM] — an UNTRACKED MULTILINE edit of an SDT-inner paragraph must
+// REFUSE with INVALID_LOCATOR (a paragraph inside a w:sdt cannot be split into
+// sibling paragraphs; the old code silently degraded to a single <w:p> with
+// soft <w:br/> breaks). A single-line untracked SDT-inner edit still works in
+// place; a direct-body multiline untracked edit still splits.
+// -------------------------------------------------------------------------
+describe("F2: untracked multiline edit of an SDT-inner paragraph is refused", () => {
+  /** The portion of document.xml inside the top-level <w:sdt>. */
+  function sdtPart(xml: string): string {
+    return xml.slice(xml.indexOf("<w:sdt"), xml.indexOf("</w:sdt>") + "</w:sdt>".length);
+  }
+
+  it("throws INVALID_LOCATOR and leaves the SDT <w:p> unchanged", async () => {
+    const p = await createDocWithSdt("inside the content control");
+    const before = await readRawDocXml(p);
+    const sdtBefore = sdtPart(before);
+
+    let err: unknown;
+    try {
+      await editParagraphs(p, [{ paragraphIndex: 1, newText: "a\nb\nc" }], false);
+    } catch (e) {
+      err = e;
+    }
+    expect(err, "expected a throw").toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INVALID_LOCATOR);
+
+    // The SDT-inner paragraph is untouched (the refusal happens before any write).
+    const after = await readRawDocXml(p);
+    expect(sdtPart(after)).toBe(sdtBefore);
+  });
+
+  it("a SINGLE-LINE untracked edit of an SDT-inner paragraph still edits in place", async () => {
+    const p = await createDocWithSdt("inside the content control");
+    await editParagraphs(p, [{ paragraphIndex: 1, newText: "edited inside sdt" }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("edited inside sdt");
+    // Still exactly one <w:p> inside the SDT (no split, no extra paragraphs).
+    const pInSdt = (sdtPart(xml).match(/<w:p[ >]/g) ?? []).length;
+    expect(pInSdt).toBe(1);
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("a direct-body multiline untracked edit STILL splits into separate paragraphs", async () => {
+    const p = await createTmpDoc("orig");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "a\nb\nc" }], false);
+    expect(pyBodyParagraphs(p)).toEqual(["a", "b", "c"]);
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("a TRACKED multiline edit of an SDT-inner paragraph is unaffected (soft breaks, no refusal)", async () => {
+    const p = await createDocWithSdt("inside the content control");
+    await editParagraphs(p, [{ paragraphIndex: 1, newText: "a\nb\nc" }], true);
+    const xml = await readRawDocXml(p);
+    // Tracked path uses <w:br/> soft breaks inside a <w:ins>, no paragraph split.
+    expect(sdtPart(xml)).toContain("<w:br/>");
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// F3 [MEDIUM] — CRLF / "\n" handling missed three <w:t> writers:
+//   - createDocument(content): a preceding "\r" survived in <w:t>.
+//   - addComment / addComments: a "\r" survived in comments.xml.
+//   - insertTable cell data: a literal "\n" was written into <w:t>.
+// Fix: normalizeNewlines before the "\n" split on each path; insertTable cell
+// data additionally renders "\n" as a <w:br/> soft break.
+// -------------------------------------------------------------------------
+describe("F3: CRLF / newline normalization on create / table / comment write paths", () => {
+  it("createDocument with CRLF content → zero raw \\r, two clean paragraphs", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await createDocument(p, undefined, "p1\r\np2");
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(pyBodyParagraphs(p)).toEqual(["p1", "p2"]);
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("addComment with CRLF comment text → zero raw \\r in comments.xml", async () => {
+    const p = await createTmpDoc("comment anchor word");
+    await addComment(p, "anchor", "a\r\nb", "QA");
+    const cxml = await readRawCommentsXml(p);
+    expect(rawCRCount(cxml)).toBe(0);
+    // Two comment paragraphs (the "\n" became a paragraph split, no stray "\r").
+    expect(cxml).toContain("a");
+    expect(cxml).toContain("b");
+    execFileSync("bash", ["-c", `unzip -p "${p}" word/comments.xml | xmllint --noout -`]);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("addComments (batch) with CRLF comment text → zero raw \\r in comments.xml", async () => {
+    const p = await createTmpDoc("batch anchor word");
+    await addComments(p, [{ anchor_text: "anchor", comment_text: "x\r\ny" }], "QA");
+    const cxml = await readRawCommentsXml(p);
+    expect(rawCRCount(cxml)).toBe(0);
+    execFileSync("bash", ["-c", `unzip -p "${p}" word/comments.xml | xmllint --noout -`]);
+  });
+
+  it("insertTable cell data with \\n → a <w:br/> soft break, no literal LF in <w:t>", async () => {
+    const p = await createTmpDoc("intro");
+    await insertTable(p, -1, 1, 1, [["c1\nc2"]]);
+    const xml = await readRawDocXml(p);
+    // No <w:t> node contains an embedded newline character.
+    expect(xml).not.toMatch(/<w:t[^>]*>[^<]*\n[^<]*<\/w:t>/);
+    // The newline rendered as a soft break inside the cell run.
+    expect(xml).toContain("<w:br/>");
+    // python-docx reads the cell as the two lines joined by a newline.
+    expect(pyFirstCellText(p)).toBe("c1\nc2");
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("insertTable cell data with CRLF → zero raw \\r and a <w:br/> soft break", async () => {
+    const p = await createTmpDoc("intro");
+    await insertTable(p, -1, 1, 1, [["r1\r\nr2"]]);
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(xml).toContain("<w:br/>");
+    expect(pyFirstCellText(p)).toBe("r1\nr2");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("insertTable cell data without a newline still writes a single plain run", async () => {
+    const p = await createTmpDoc("intro");
+    await insertTable(p, -1, 1, 1, [["plain"]]);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("plain");
+    expect(pyFirstCellText(p)).toBe("plain");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// F4 [LOW] — insertTableParagraphs must REJECT a non-integer `position` with
+// INDEX_OUT_OF_RANGE (it previously treated 0.5 / NaN as append), matching the
+// M7 integer-validation policy. A -1 or out-of-range INTEGER position still
+// appends, unchanged.
+// -------------------------------------------------------------------------
+describe("F4: insertTableParagraphs rejects a non-integer position", () => {
+  async function expectIndexError(fn: () => Promise<unknown>): Promise<void> {
+    let err: unknown;
+    try {
+      await fn();
+    } catch (e) {
+      err = e;
+    }
+    expect(err, "expected a throw").toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INDEX_OUT_OF_RANGE);
+  }
+
+  for (const [label, val] of [["fractional 0.5", 0.5], ["NaN", NaN]] as [string, number][]) {
+    it(`rejects position=${label}`, async () => {
+      const p = await createDocParaThenTable(); // table at block 1, cell has 1 paragraph
+      await expectIndexError(() =>
+        insertTableParagraphs(
+          p,
+          [{ blockIndex: 1, rowIndex: 0, colIndex: 0, position: val, text: "frac" }],
+          false,
+        ),
+      );
+      // The cell was not mutated by the rejected insert.
+      expect(pyFirstCellText(p)).toBe("ORIG");
+    });
+  }
+
+  it("a -1 position still APPENDS (unchanged)", async () => {
+    const p = await createDocParaThenTable();
+    await insertTableParagraphs(
+      p,
+      [{ blockIndex: 1, rowIndex: 0, colIndex: 0, position: -1, text: "appended" }],
+      false,
+    );
+    expect(pyFirstCellText(p)).toBe("ORIG\nappended");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("a large out-of-range INTEGER position still APPENDS (unchanged)", async () => {
+    const p = await createDocParaThenTable();
+    await insertTableParagraphs(
+      p,
+      [{ blockIndex: 1, rowIndex: 0, colIndex: 0, position: 9999, text: "appended-large" }],
+      false,
+    );
+    expect(pyFirstCellText(p)).toBe("ORIG\nappended-large");
     expect(xmlIsWellFormed(p)).toBe(true);
   });
 });

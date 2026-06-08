@@ -1655,15 +1655,20 @@ export async function editParagraphs(
     // references (not indices) are held because an untracked multi-line edit
     // splices new sibling paragraphs into the body, shifting later indices.
     // `directBody` records whether each target is a DIRECT-body paragraph; only
-    // those are in anchor scope (v1), so only those auto-seed (M-rev).
+    // those are in anchor scope (v1), so only those auto-seed (M-rev). The
+    // resolved container is also kept per target so the untracked multi-line
+    // SPLIT path can refuse a paragraph that does not live directly in the body
+    // (an SDT-inner paragraph cannot be split into sibling <w:p> — see F2 below).
     const targets: XNode[] = [];
     const directBody = new Set<XNode>();
+    const containerOf = new Map<XNode, XNode[]>();
     for (const edit of edits) {
       const loc = locatorToLocation(refs, anchorIndex, edit);
       if (trackChanges && paragraphHasRevisions(loc.element["w:p"] as XNode[])) {
         throwPendingRevisions(`Paragraph ${describeLocator(edit)}`);
       }
       targets.push(loc.element);
+      containerOf.set(loc.element, loc.parent);
       if (loc.parent === body) directBody.add(loc.element);
     }
 
@@ -1681,6 +1686,24 @@ export async function editParagraphs(
       finalText.set(targets[i], edits[i].newText);
     }
     for (const [element, newText] of finalText) {
+      // F2: an UNTRACKED MULTI-LINE edit splits the paragraph into sibling <w:p>
+      // (replaceParagraphTextMultiline splices into the container). That is only
+      // valid when the paragraph lives directly in the body — for a paragraph
+      // inside a content control (w:sdt) the container is the SDT's sdtContent,
+      // and a structural paragraph add/remove there is refused by design (C1).
+      // Without this guard the split would silently degrade to a single <w:p>
+      // with <w:br/> soft breaks (wrong container, inconsistent + silent). Be
+      // explicit: refuse, and tell the caller how to proceed. A single-line
+      // untracked edit (no "\n") still edits in place; tracked edits use soft
+      // breaks (no split) and are unaffected; a direct-body multi-line edit
+      // still splits.
+      const isMultiline = !ctx && normalizeNewlines(newText).includes("\n");
+      if (isMultiline && containerOf.get(element) !== body) {
+        throw new EngineError(
+          ErrorCode.INVALID_LOCATOR,
+          "cannot split a paragraph inside a content control (w:sdt); edit it as a single line, or by index in place",
+        );
+      }
       // Touched-paragraph auto-seed (kept by in-place single-line edits) — only
       // for direct-body paragraphs. A paragraph inside a top-level w:sdt is out
       // of anchor scope, so seeding it would write an unreachable, scope-
@@ -2384,8 +2407,9 @@ export async function addComment(
     const commentId = getNextCommentId(commentsChildren);
     const now = new Date().toISOString();
 
-    // Add comment to comments.xml
-    const lines = commentText.split("\n");
+    // Add comment to comments.xml. Normalize CRLF / lone CR before splitting so
+    // no stray "\r" survives inside a comment <w:t> (F3).
+    const lines = normalizeNewlines(commentText).split("\n");
     const commentParas = lines.map((line) =>
       el("w:p", [
         el("w:r", [
@@ -2487,7 +2511,9 @@ export async function addComments(
 
       const commentId = nextId++;
 
-      const lines = c.comment_text.split("\n");
+      // Normalize CRLF / lone CR before splitting so no stray "\r" survives
+      // inside a comment <w:t> (F3).
+      const lines = normalizeNewlines(c.comment_text).split("\n");
       const commentParas = lines.map((line) =>
         el("w:p", [
           el("w:r", [
@@ -3069,7 +3095,10 @@ export async function createDocument(
     }
 
     if (content) {
-      const lines = content.split("\n");
+      // Normalize CRLF / lone CR to "\n" BEFORE splitting so a preceding "\r"
+      // does not survive inside a <w:t> (a conformant reader would otherwise
+      // turn it into a literal newline char in the run) — F3.
+      const lines = normalizeNewlines(content).split("\n");
       for (const line of lines) {
         bodyXml += `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>\n`;
       }
@@ -3252,14 +3281,15 @@ export async function insertTable(
       const cellNodes: XNode[] = [];
       for (let c = 0; c < cols; c++) {
         const cellText = data?.[r]?.[c] ?? "";
+        // Render the cell text via makeTextRuns so an embedded "\n" (after CRLF
+        // normalization) becomes a <w:br/> SOFT break inside the cell run rather
+        // than a literal newline left inside a single <w:t> — matching the
+        // tracked-cell / untracked editTableParagraphs convention (F3). An empty
+        // cell yields a paragraph with no run (valid OOXML, reads as "").
         cellNodes.push(
           el("w:tc", [
             el("w:tcPr", [el("w:tcW", [], { "w:w": "0", "w:type": "auto" })]),
-            el("w:p", [
-              el("w:r", [
-                el("w:t", [textNode(cellText)], { "xml:space": "preserve" }),
-              ]),
-            ]),
+            el("w:p", makeTextRuns(cellText, null)),
           ]),
         );
       }
@@ -3999,11 +4029,17 @@ export async function insertTableParagraphs(
       // buildNewParagraph returns one or more <w:p> (untracked multi-line input
       // splits on "\n"); splice them all in at the resolved spot.
       const newParas = buildNewParagraph(ins.text, ins.style, ctx, opts);
-      // A non-integer / out-of-range / negative position appends (anchor null).
+      // F4: a NON-INTEGER position is rejected (matching the M7 integer policy
+      // and the spliceNewParagraph guard) rather than silently appending. A -1
+      // or out-of-range INTEGER position still appends (anchor null), unchanged.
+      if (!Number.isInteger(ins.position)) {
+        throw new EngineError(
+          ErrorCode.INDEX_OUT_OF_RANGE,
+          `Insert position ${ins.position} must be an integer cell-paragraph index (use -1 to append).`,
+        );
+      }
       const anchor =
-        Number.isInteger(ins.position) && ins.position >= 0 && ins.position < paras.length
-          ? paras[ins.position]
-          : null;
+        ins.position >= 0 && ins.position < paras.length ? paras[ins.position] : null;
       resolved.push({ cellChildren, anchor, newParas });
     }
 

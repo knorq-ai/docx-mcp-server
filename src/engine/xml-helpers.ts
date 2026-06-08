@@ -93,7 +93,11 @@ export function attr(el: XNode, name: string): string | undefined {
 
 export function setAttr(el: XNode, name: string, value: string): void {
   if (!el[":@"]) el[":@"] = {};
-  el[":@"]["@_" + name] = value;
+  // Sanitize XML-illegal control chars / lone surrogates in user-controlled
+  // attribute values (e.g. w:author, w:pStyle/@w:val, font names, colors). The
+  // builder's processEntities still escapes markup chars (&,<,>,") on output, so
+  // we only STRIP illegal chars here — never escape (that would double-encode).
+  el[":@"]["@_" + name] = typeof value === "string" ? sanitizeXmlText(value) : value;
 }
 
 export function findAll(nodes: XNode[], tag: string): XNode[] {
@@ -114,7 +118,9 @@ export function el(
   if (attrs) {
     node[":@"] = {};
     for (const [k, v] of Object.entries(attrs)) {
-      node[":@"]["@_" + k] = v;
+      // Same sanitization chokepoint as setAttr: strip XML-illegal chars from
+      // string attribute values (do NOT escape — the builder does that).
+      node[":@"]["@_" + k] = typeof v === "string" ? sanitizeXmlText(v) : v;
     }
   }
   return node;
