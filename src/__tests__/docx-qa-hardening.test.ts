@@ -1015,3 +1015,51 @@ describe("L3: get_paragraph_format JSON carries explicit defaults for plain para
     expect(Object.prototype.hasOwnProperty.call(parsed, "headingLevel")).toBe(true);
   });
 });
+
+// M7 (residual) — the integer guard missed two INSERT sites: spliceNewParagraph
+// (insert_paragraphs / insert_table position) and resolveCellInsertOpts
+// (insert_table_paragraphs copy_format_from). A fractional/NaN value fell through
+// the `< 0 || >= len` bounds check and threw a raw TypeError surfaced as
+// INTERNAL_ERROR. Found by the re-QA regression sweep.
+describe("M7 residual: non-integer insert position / copy_format_from rejected cleanly", () => {
+  async function expectIndexError(fn: () => Promise<unknown>): Promise<void> {
+    let err: unknown;
+    try {
+      await fn();
+    } catch (e) {
+      err = e;
+    }
+    expect(err, "expected a throw").toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INDEX_OUT_OF_RANGE);
+  }
+
+  for (const [label, val] of [["fractional 1.5", 1.5], ["NaN", NaN]] as [string, number][]) {
+    it(`insert_paragraphs rejects position=${label}`, async () => {
+      const p = await createTmpDoc("a");
+      await expectIndexError(() => insertParagraphs(p, [{ text: "x", position: val }], false));
+    });
+    it(`insert_table rejects position=${label}`, async () => {
+      const p = await createTmpDoc("a");
+      await expectIndexError(() => insertTable(p, val, 1, 1, [["c"]]));
+    });
+    it(`insert_table_paragraphs rejects copy_format_from=${label}`, async () => {
+      const p = await createDocParaThenTable(); // table at block 1, cell has 1 paragraph
+      await expectIndexError(() =>
+        insertTableParagraphs(
+          p,
+          [{ blockIndex: 1, rowIndex: 0, colIndex: 0, position: -1, text: "x", copyFormatFrom: val }],
+          false,
+        ),
+      );
+    });
+  }
+
+  it("still appends with an out-of-range INTEGER position (-1 and large), unchanged", async () => {
+    const p = await createTmpDoc("base");
+    await insertParagraphs(p, [{ text: "appended-neg1", position: -1 }], false);
+    await insertParagraphs(p, [{ text: "appended-large", position: 999 }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("appended-neg1");
+    expect(xml).toContain("appended-large");
+  });
+});

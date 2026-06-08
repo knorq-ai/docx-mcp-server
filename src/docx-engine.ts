@@ -1871,6 +1871,12 @@ function spliceNewParagraph(
   position: number,
   newParas: XNode[],
 ): void {
+  if (!Number.isInteger(position)) {
+    throw new EngineError(
+      ErrorCode.INDEX_OUT_OF_RANGE,
+      `Insert position ${position} must be an integer block index (use -1 to append).`,
+    );
+  }
   if (position < 0 || position >= refs.length) {
     const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
     if (sectPrIdx !== -1) {
@@ -3904,7 +3910,7 @@ function resolveCellInsertOpts(
   copyFormatFrom?: number,
 ): BuildParagraphOptions | undefined {
   if (copyFormatFrom !== undefined) {
-    if (copyFormatFrom < 0 || copyFormatFrom >= paras.length) {
+    if (!Number.isInteger(copyFormatFrom) || copyFormatFrom < 0 || copyFormatFrom >= paras.length) {
       throw new EngineError(
         ErrorCode.INDEX_OUT_OF_RANGE,
         `copy_format_from index ${copyFormatFrom} out of range (0–${paras.length - 1}) for the target cell.`,
