@@ -180,6 +180,11 @@ export function formatInParagraph(
   fmt: TextFormatting,
   caseSensitive: boolean,
 ): number {
+  // An empty needle would push into `matches` every iteration without advancing
+  // `pos`, growing the array until it exceeds the JS max length and throws
+  // `RangeError: Invalid array length`. Bail fast (MCP layer also guards).
+  if (search.length === 0) return 0;
+
   const runs = collectRunsWithIndices(pChildren);
   if (runs.length === 0) return 0;
 

@@ -11,6 +11,7 @@ import {
   el,
   textNode,
   cloneNode,
+  sanitizeXmlText,
 } from "./xml-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -356,6 +357,14 @@ export function replaceInParagraph(
   replace: string,
   caseSensitive: boolean,
 ): number {
+  // An empty needle would never advance `pos` below (indexOf returns the same
+  // index every iteration) → infinite loop. Bail fast (defense in depth; the
+  // MCP layer also guards with .min(1)).
+  if (search.length === 0) return 0;
+  // The untracked path writes `replace` straight into #text nodes (bypassing
+  // textNode), so sanitize illegal XML control chars here at the entrypoint.
+  replace = sanitizeXmlText(replace);
+
   const runs = collectRuns(pChildren);
   if (runs.length === 0) return 0;
 
@@ -705,6 +714,9 @@ function replaceInChildrenTracked(
   caseSensitive: boolean,
   ctx: RevisionContext,
 ): number {
+  // Empty needle would spin forever in the match loop below — bail fast.
+  if (search.length === 0) return 0;
+
   const runs = collectRunsWithIndices(children);
   if (runs.length === 0) return 0;
 

@@ -10,6 +10,7 @@ import {
   builder,
   findAll,
   findOne,
+  sanitizeXmlText,
 } from "./xml-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -158,7 +159,10 @@ export function getHeaderFooterFiles(handle: DocxHandle): string[] {
 // ---------------------------------------------------------------------------
 
 export function escapeXml(text: string): string {
-  return text
+  // Strip XML-1.0-illegal control chars first (same chokepoint as textNode),
+  // then escape the markup-significant characters. Covers the string-building
+  // path (createDocument) just as textNode covers the builder path.
+  return sanitizeXmlText(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

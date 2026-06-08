@@ -625,6 +625,11 @@ function buildTextMatch(
   searchStr: string,
   queryLen: number,
 ): { occurrences: number; context: string } | null {
+  // An empty needle never advances `searchFrom` (indexOf returns the same index
+  // forever) → infinite synchronous loop that bricks the single-threaded server.
+  // Report zero matches instead (the MCP layer also rejects empty queries).
+  if (searchStr.length === 0) return null;
+
   const first = compare.indexOf(searchStr);
   if (first === -1) return null;
 
@@ -666,6 +671,12 @@ export async function searchTextStructured(
   const searchStr = caseSensitive ? query : query.toLowerCase();
   const matches: SearchMatch[] = [];
   let totalMatches = 0;
+
+  // An empty query matches everything / nothing meaningfully and would otherwise
+  // spin in buildTextMatch's loop — return zero matches immediately.
+  if (searchStr.length === 0) {
+    return { file: path.basename(filePath), query, totalMatches: 0, matches };
+  }
 
   // A direct-body paragraph match carries its anchor (when present); SDT/table
   // matches omit it (those paragraphs aren't anchored in v1).
@@ -1477,6 +1488,23 @@ function replaceParagraphTextMultiline(
 }
 
 /**
+ * ECMA-376 (CT_Tc) requires a table cell's content to END with a block-level
+ * <w:p>; a nested <w:tbl> may not be the last block child (Word always keeps a
+ * terminating paragraph after a nested table). After any rebuild that may drop
+ * the trailing paragraph, call this to restore the invariant. The "cell has ≥1
+ * w:p" check elsewhere is weaker — it passes for [w:p, w:tbl], which is invalid.
+ */
+function ensureCellEndsWithParagraph(cellChildren: XNode[]): void {
+  let lastBlock: XNode | undefined;
+  for (const child of cellChildren) {
+    if (child["w:p"] || child["w:tbl"]) lastBlock = child;
+  }
+  if (lastBlock && lastBlock["w:tbl"]) {
+    cellChildren.push(el("w:p", []));
+  }
+}
+
+/**
  * Replace ALL block-level paragraphs of a table cell with paragraphs built from
  * newText (split on "\n" so each line is its own <w:p>). The new paragraphs
  * inherit the cell's first paragraph's pPr (deep-cloned for lines 2..N) and its
@@ -1521,6 +1549,11 @@ function replaceCellContentUntracked(cellChildren: XNode[], newText: string): vo
   if (!inserted) newChildren.push(...newParas);
   cellChildren.length = 0;
   cellChildren.push(...newChildren);
+
+  // The new paragraphs replaced the FIRST w:p block and any other w:p children
+  // were dropped — including a paragraph that terminated the cell after a nested
+  // table. Restore the "cell ends with w:p" invariant if it now ends in a table.
+  ensureCellEndsWithParagraph(cellChildren);
 }
 
 // ---------------------------------------------------------------------------
@@ -3102,7 +3135,19 @@ export async function insertTable(
       ]),
     );
 
-    // Table rows
+    // Table grid — REQUIRED by ECMA-376 CT_Tbl, immediately after w:tblPr. Must
+    // carry exactly `cols` w:gridCol children or strict validators (python-docx)
+    // reject the file with InvalidXmlError.
+    const gridCols: XNode[] = [];
+    for (let c = 0; c < cols; c++) {
+      gridCols.push(el("w:gridCol", [], { "w:w": "0" }));
+    }
+    tblChildren.push(el("w:tblGrid", gridCols));
+
+    // Table rows. The grid is always rows×cols: `data` values beyond rows×cols
+    // are ignored (extra rows/columns dropped), and missing cells (short rows or
+    // omitted data) are blank-padded via the `?? ""` below. Documented in the
+    // insert_table `data` description.
     for (let r = 0; r < rows; r++) {
       const cellNodes: XNode[] = [];
       for (let c = 0; c < cols; c++) {
@@ -3769,12 +3814,16 @@ export async function deleteTableParagraphs(
         const idx = cellChildren.indexOf(paraEl);
         if (idx !== -1) cellChildren.splice(idx, 1);
       }
-      // A <w:tc> must contain at least one <w:p>; restore a blank one if the
-      // last paragraph of a cell was removed.
+      // A <w:tc> must END with a <w:p> (ECMA-376 CT_Tc) — stronger than "has ≥1
+      // w:p". Restore a blank paragraph when the cell now has none OR ends in a
+      // nested <w:tbl> (e.g. the deleted paragraph was the one terminating the
+      // cell after a nested table).
       const affectedCells = new Set(resolved.map((r) => r.cellChildren));
       for (const cellChildren of affectedCells) {
         if (!cellChildren.some((c: XNode) => c["w:p"])) {
           cellChildren.push(el("w:p", []));
+        } else {
+          ensureCellEndsWithParagraph(cellChildren);
         }
       }
     }

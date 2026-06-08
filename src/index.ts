@@ -211,7 +211,7 @@ server.tool(
   "Search for text in a DOCX file. Returns matching blocks with context. Each match's <json> entry includes the paragraph's stable `anchor` when it has one (run ensure_anchors first to populate them), so you can edit by anchor instead of a soon-to-shift block index.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    query: z.string().describe("Text to search for"),
+    query: z.string().min(1).describe("Text to search for (non-empty)"),
     case_sensitive: z
       .boolean()
       .optional()
@@ -622,7 +622,7 @@ server.tool(
   "Apply character formatting (bold, italic, underline, highlight, font, size, color) to all runs matching the search text.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    search: z.string().describe("Text to find and format"),
+    search: z.string().min(1).describe("Text to find and format (non-empty)"),
     bold: z.boolean().optional().describe("Set bold (true/false)"),
     italic: z.boolean().optional().describe("Set italic (true/false)"),
     underline: z.boolean().optional().describe("Set underline (true/false)"),
@@ -999,7 +999,7 @@ server.tool(
   "Highlight all occurrences of text with a specified color.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    search: z.string().describe("Text to highlight"),
+    search: z.string().min(1).describe("Text to highlight (non-empty)"),
     color: z
       .string()
       .optional()
@@ -1046,7 +1046,9 @@ server.tool(
     data: z
       .array(z.array(z.string()))
       .optional()
-      .describe("Optional 2D array of cell values, e.g. [['A1','B1'],['A2','B2']]"),
+      .describe(
+        "Optional 2D array of cell values, e.g. [['A1','B1'],['A2','B2']]. The table is always rows×cols: values beyond rows×cols are ignored (extra rows/columns dropped), and short rows are blank-padded.",
+      ),
   },
   async ({ file_path, position, rows, cols, data }) => {
     try {

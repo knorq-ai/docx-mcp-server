@@ -98,9 +98,25 @@ export function el(
   return node;
 }
 
-/** Create a text node */
+/**
+ * XML-1.0 forbids these C0 control characters in character data: U+0000–U+0008,
+ * U+000B (vertical tab), U+000C (form feed), and U+000E–U+001F (incl. U+001B
+ * ESC). Only \t (U+0009), \n (U+000A) and \r (U+000D) are legal whitespace and
+ * are preserved. Such chars routinely arrive in text pasted from PDFs/terminals;
+ * writing them verbatim produces a document.xml that Word and python-docx reject.
+ * We strip them (Word's own behavior) so no run-text path can corrupt the file.
+ */
+// eslint-disable-next-line no-control-regex
+const ILLEGAL_XML_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
+
+/** Remove XML-1.0-illegal control characters from run text (keeps \t \n \r). */
+export function sanitizeXmlText(text: string): string {
+  return text.replace(ILLEGAL_XML_CHARS, "");
+}
+
+/** Create a text node (illegal XML control chars are stripped here). */
 export function textNode(text: string): XNode {
-  return { "#text": text };
+  return { "#text": sanitizeXmlText(text) };
 }
 
 export function cloneNode(node: XNode): XNode {
