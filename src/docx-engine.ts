@@ -43,7 +43,6 @@ import {
   parseDocXml,
   serializeDocXml,
   getBody,
-  blockBodyIndices,
   forEachParagraphInTable,
   getHeaderFooterFiles,
   escapeXml,
@@ -57,6 +56,8 @@ import {
   getParagraphStyle,
   getHeadingLevel,
   enumerateBlocks,
+  type BlockRef,
+  enumerateBlockRefs,
   replaceInParagraph,
   replaceInParagraphTracked,
   paragraphHasRevisions,
@@ -238,6 +239,24 @@ async function scanMaxIdAcrossParts(
 // Stable paragraph anchors (issue #7) — locator resolution + auto-seeding
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve a block index against the canonical block-index space (the SAME
+ * numbering read_document / get_document_info / search_text expose). Throws
+ * INDEX_OUT_OF_RANGE for a non-integer / out-of-bounds index. The returned
+ * `BlockRef` carries the element plus its container + position so callers can
+ * read, edit in place, or splice at exactly the right spot — including for a
+ * paragraph that lives inside a top-level `w:sdt`.
+ */
+function resolveBlockRef(refs: BlockRef[], blockIndex: number): BlockRef {
+  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= refs.length) {
+    throw new EngineError(
+      ErrorCode.INDEX_OUT_OF_RANGE,
+      `Block index ${blockIndex} out of range (0–${refs.length - 1}).`,
+    );
+  }
+  return refs[blockIndex];
+}
+
 /** A paragraph locator: exactly one of paragraphIndex / anchor. */
 export interface ParagraphLocator {
   paragraphIndex?: number;
@@ -249,8 +268,7 @@ export interface ParagraphLocator {
  * location. `anchorIndex` is built once per call via buildAnchorIndex(body).
  */
 function locatorToLocation(
-  body: XNode[],
-  bodyIdxs: number[],
+  refs: BlockRef[],
   anchorIndex: Map<string, ParagraphLocation[]>,
   loc: ParagraphLocator,
 ): ParagraphLocation {
@@ -266,15 +284,11 @@ function locatorToLocation(
     return resolveAnchor(anchorIndex, loc.anchor as string);
   }
   const idx = loc.paragraphIndex as number;
-  if (!Number.isInteger(idx) || idx < 0 || idx >= bodyIdxs.length) {
-    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${idx} out of range (0–${bodyIdxs.length - 1}).`);
-  }
-  const bodyIndex = bodyIdxs[idx];
-  const element = body[bodyIndex];
-  if (!element["w:p"]) {
+  const ref = resolveBlockRef(refs, idx);
+  if (!ref.element["w:p"]) {
     throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${idx} is not a paragraph (it may be a table).`);
   }
-  return { element, parent: body, bodyIndex, blockIndex: idx };
+  return { element: ref.element, parent: ref.container, bodyIndex: ref.indexInContainer, blockIndex: idx };
 }
 
 /**
@@ -374,24 +388,27 @@ export async function ensureAnchorsStructured(filePath: string): Promise<EnsureA
       await saveDocx(handle);
     }
 
-    // Build the full block map (paragraphs + tables) for the result.
+    // Build the full block map (paragraphs + tables) for the result, numbered in
+    // the SAME unified block-index space read_document / get_document_info /
+    // search_text use (M5). SDT-contained paragraphs are listed (and advance the
+    // index) but carry no anchor — anchor scope is still direct-body paragraphs
+    // only, so only the printed index changes for SDT docs, never the anchors.
     const blocks: AnchorBlockInfo[] = [];
-    const bodyIdxs = blockBodyIndices(body);
-    bodyIdxs.forEach((bi, index) => {
-      const el2 = body[bi];
-      if (el2["w:p"]) {
+    enumerateBlockRefs(body).forEach((ref, index) => {
+      if (ref.type === "paragraph") {
+        const isDirectBody = ref.container === body;
         blocks.push({
           index,
           type: "paragraph",
-          anchor: attr(el2, "w14:paraId") ?? null,
-          textPreview: anchorPreview(extractParagraphText(el2["w:p"] as XNode[], false)),
+          anchor: isDirectBody ? attr(ref.element, "w14:paraId") ?? null : null,
+          textPreview: anchorPreview(extractParagraphText(ref.element["w:p"] as XNode[], false)),
         });
       } else {
         blocks.push({
           index,
           type: "table",
           anchor: null,
-          textPreview: anchorPreview(extractTableText(el2["w:tbl"] as XNode[], false)),
+          textPreview: anchorPreview(extractTableText(ref.element["w:tbl"] as XNode[], false)),
         });
       }
     });
@@ -773,15 +790,12 @@ export async function searchTextStructured(
 // ---------------------------------------------------------------------------
 
 /** Resolve a table block to its <w:tbl> children, validating index and type. */
-function getTableChildren(body: XNode[], bodyIdxs: number[], blockIndex: number): XNode[] {
-  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
-    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
-  }
-  const element = body[bodyIdxs[blockIndex]];
-  if (!element["w:tbl"]) {
+function getTableChildren(refs: BlockRef[], blockIndex: number): XNode[] {
+  const ref = resolveBlockRef(refs, blockIndex);
+  if (!ref.element["w:tbl"]) {
     throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
   }
-  return element["w:tbl"] as XNode[];
+  return ref.element["w:tbl"] as XNode[];
 }
 
 /** Horizontal merge span of a cell (w:gridSpan), default 1. */
@@ -855,8 +869,8 @@ export async function readTableStructureStructured(
   const handle = await openDocx(filePath);
   const parsed = await parseDocXml(handle);
   const body = getBody(parsed);
-  const bodyIdxs = blockBodyIndices(body);
-  const tblChildren = getTableChildren(body, bodyIdxs, blockIndex);
+  const refs = enumerateBlockRefs(body);
+  const tblChildren = getTableChildren(refs, blockIndex);
 
   const rows = findAll(tblChildren, "w:tr");
   const cells: TableStructureCell[] = [];
@@ -927,13 +941,12 @@ export interface TableCellReadResult {
 
 /** Navigate to a cell's <w:tc> children (read-only), validating each index. */
 function getTableCellChildren(
-  body: XNode[],
-  bodyIdxs: number[],
+  refs: BlockRef[],
   blockIndex: number,
   rowIndex: number,
   colIndex: number,
 ): XNode[] {
-  const tblChildren = getTableChildren(body, bodyIdxs, blockIndex);
+  const tblChildren = getTableChildren(refs, blockIndex);
   const rows = findAll(tblChildren, "w:tr");
   if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= rows.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
@@ -954,8 +967,8 @@ export async function readTableCellStructured(
   const handle = await openDocx(filePath);
   const parsed = await parseDocXml(handle);
   const body = getBody(parsed);
-  const bodyIdxs = blockBodyIndices(body);
-  const tcChildren = getTableCellChildren(body, bodyIdxs, blockIndex, rowIndex, colIndex);
+  const refs = enumerateBlockRefs(body);
+  const tcChildren = getTableCellChildren(refs, blockIndex, rowIndex, colIndex);
 
   const paragraphs: TableCellParagraphInfo[] = [];
   let pIdx = 0;
@@ -1078,17 +1091,14 @@ export async function getParagraphFormatStructured(
   const handle = await openDocx(filePath);
   const parsed = await parseDocXml(handle);
   const body = getBody(parsed);
-  const bodyIdxs = blockBodyIndices(body);
+  const refs = enumerateBlockRefs(body);
 
-  if (!Number.isInteger(paragraphIndex) || paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
-    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
-  }
-  const element = body[bodyIdxs[paragraphIndex]];
-  if (!element["w:p"]) {
+  const ref = resolveBlockRef(refs, paragraphIndex);
+  if (!ref.element["w:p"]) {
     throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${paragraphIndex} is not a paragraph (it may be a table).`);
   }
 
-  const pChildren = element["w:p"] as XNode[];
+  const pChildren = ref.element["w:p"] as XNode[];
   const style = getParagraphStyle(pChildren);
   const result: ParagraphFormatResult = {
     file: path.basename(filePath),
@@ -1638,7 +1648,7 @@ export async function editParagraphs(
     const parsed = await parseDocXml(handle);
     const root = getDocumentRoot(parsed);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
     const anchorIndex = buildAnchorIndex(body);
 
     // Resolve and validate every locator (index or anchor) upfront. Element
@@ -1646,7 +1656,7 @@ export async function editParagraphs(
     // splices new sibling paragraphs into the body, shifting later indices.
     const targets: XNode[] = [];
     for (const edit of edits) {
-      const loc = locatorToLocation(body, bodyIdxs, anchorIndex, edit);
+      const loc = locatorToLocation(refs, anchorIndex, edit);
       if (trackChanges && paragraphHasRevisions(loc.element["w:p"] as XNode[])) {
         throwPendingRevisions(`Paragraph ${describeLocator(edit)}`);
       }
@@ -1845,23 +1855,39 @@ function buildPPrForNewParagraph(
   return el("w:pPr", pPrChildren);
 }
 
-/** Insert paragraph element(s) into body at the given position, handling sectPr and append. */
+/**
+ * Insert paragraph element(s) into the body before the block at `position`
+ * (unified block-index space), handling sectPr and append.
+ *
+ * An out-of-range position (including -1) appends before sectPr — the documented
+ * "append" behaviour. An in-range position that resolves to a paragraph INSIDE a
+ * top-level `w:sdt` is refused with a clear error rather than silently splicing
+ * into the body at the wrong place: content controls must be edited in place
+ * (by index/anchor) or have their inner paragraphs targeted directly.
+ */
 function spliceNewParagraph(
   body: XNode[],
-  bodyIdxs: number[],
+  refs: BlockRef[],
   position: number,
   newParas: XNode[],
 ): void {
-  if (position < 0 || position >= bodyIdxs.length) {
+  if (position < 0 || position >= refs.length) {
     const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
     if (sectPrIdx !== -1) {
       body.splice(sectPrIdx, 0, ...newParas);
     } else {
       body.push(...newParas);
     }
-  } else {
-    body.splice(bodyIdxs[position], 0, ...newParas);
+    return;
   }
+  const ref = refs[position];
+  if (ref.container !== body) {
+    throw new EngineError(
+      ErrorCode.INVALID_LOCATOR,
+      `Cannot insert a paragraph relative to block ${position}: it is inside a content control (w:sdt). Edit the content control in place by index/anchor instead.`,
+    );
+  }
+  body.splice(ref.indexInContainer, 0, ...newParas);
 }
 
 // ---------------------------------------------------------------------------
@@ -1870,27 +1896,20 @@ function spliceNewParagraph(
 
 /** Resolve BuildParagraphOptions from user-facing parameters. */
 function resolveInsertOpts(
-  body: XNode[],
-  bodyIdxs: number[],
+  refs: BlockRef[],
   numId?: number,
   numLevel?: number,
   copyFormatFrom?: number,
 ): BuildParagraphOptions | undefined {
   if (copyFormatFrom !== undefined) {
-    if (!Number.isInteger(copyFormatFrom) || copyFormatFrom < 0 || copyFormatFrom >= bodyIdxs.length) {
-      throw new EngineError(
-        ErrorCode.INDEX_OUT_OF_RANGE,
-        `copy_format_from index ${copyFormatFrom} out of range (0–${bodyIdxs.length - 1}).`,
-      );
-    }
-    const srcEl = body[bodyIdxs[copyFormatFrom]];
-    if (!srcEl["w:p"]) {
+    const ref = resolveBlockRef(refs, copyFormatFrom);
+    if (!ref.element["w:p"]) {
       throw new EngineError(
         ErrorCode.NOT_A_PARAGRAPH,
         `Block ${copyFormatFrom} is not a paragraph (copy_format_from must reference a paragraph).`,
       );
     }
-    const pPr = findOne(srcEl["w:p"] as XNode[], "w:pPr");
+    const pPr = findOne(ref.element["w:p"] as XNode[], "w:pPr");
     if (pPr) {
       return { sourcePPr: pPr };
     }
@@ -1920,8 +1939,7 @@ export interface InsertParagraphItem {
 
 /** Resolve build options for one insert item (index or anchor copy_format source). */
 function resolveInsertOptsForItem(
-  body: XNode[],
-  bodyIdxs: number[],
+  refs: BlockRef[],
   anchorIndex: Map<string, ParagraphLocation[]>,
   item: InsertParagraphItem,
 ): BuildParagraphOptions | undefined {
@@ -1930,7 +1948,7 @@ function resolveInsertOptsForItem(
     const pPr = findOne(srcEl["w:p"] as XNode[], "w:pPr");
     return pPr ? { sourcePPr: pPr } : undefined;
   }
-  return resolveInsertOpts(body, bodyIdxs, item.numId, item.numLevel, item.copyFormatFrom);
+  return resolveInsertOpts(refs, item.numId, item.numLevel, item.copyFormatFrom);
 }
 
 export interface InsertParagraphsResult {
@@ -1955,7 +1973,7 @@ export async function insertParagraphsStructured(
     const parsed = await parseDocXml(handle);
     const root = getDocumentRoot(parsed);
     const body = getBody(parsed);
-    const bodyIdxsForResolve = blockBodyIndices(body);
+    const refsForResolve = enumerateBlockRefs(body);
     const anchorIndex = buildAnchorIndex(body);
 
     // Validate the locator on every item and resolve its anchor target / opts
@@ -1977,7 +1995,7 @@ export async function insertParagraphsStructured(
         }
         anchorTarget.set(item, resolveAnchor(anchorIndex, item.anchor as string).element);
       }
-      resolvedOpts.set(item, resolveInsertOptsForItem(body, bodyIdxsForResolve, anchorIndex, item));
+      resolvedOpts.set(item, resolveInsertOptsForItem(refsForResolve, anchorIndex, item));
     }
 
     const ctx = trackChanges
@@ -1991,8 +2009,8 @@ export async function insertParagraphsStructured(
     // (so same-position items follow the documented reverse-of-array order).
     const positionItems = items.filter((i) => i.position !== undefined);
     const sorted = [...positionItems].sort((a, b) => {
-      const posA = a.position! < 0 || a.position! >= bodyIdxsForResolve.length ? Infinity : a.position!;
-      const posB = b.position! < 0 || b.position! >= bodyIdxsForResolve.length ? Infinity : b.position!;
+      const posA = a.position! < 0 || a.position! >= refsForResolve.length ? Infinity : a.position!;
+      const posB = b.position! < 0 || b.position! >= refsForResolve.length ? Infinity : b.position!;
       return posB - posA;
     });
     // buildNewParagraph returns one or more <w:p> (untracked multi-line input
@@ -2000,8 +2018,8 @@ export async function insertParagraphsStructured(
     // anchor.
     for (const item of sorted) {
       const newParas = buildNewParagraph(item.text, item.style, ctx, resolvedOpts.get(item));
-      const currentBodyIdxs = blockBodyIndices(body);
-      spliceNewParagraph(body, currentBodyIdxs, item.position as number, newParas);
+      const currentRefs = enumerateBlockRefs(body);
+      spliceNewParagraph(body, currentRefs, item.position as number, newParas);
       newParagraphs.push({ item, element: newParas[0] });
     }
 
@@ -2142,19 +2160,25 @@ export async function deleteParagraphs(
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
     const anchorIndex = buildAnchorIndex(body);
 
     // Resolve a deduplicated set of target elements. An index can target a
     // paragraph OR a table block; an anchor only ever targets a paragraph
     // (tables have no paraId). Resolution by reference makes deletion
-    // order-independent.
+    // order-independent. A block inside a top-level w:sdt is refused (deleting
+    // it would mean splicing the content control's internals — edit it in place
+    // instead) rather than silently no-op'ing or deleting a body block.
     const targets = new Set<XNode>();
     for (const idx of paragraphIndices) {
-      if (!Number.isInteger(idx) || idx < 0 || idx >= bodyIdxs.length) {
-        throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${idx} out of range (0–${bodyIdxs.length - 1}).`);
+      const ref = resolveBlockRef(refs, idx);
+      if (ref.container !== body) {
+        throw new EngineError(
+          ErrorCode.INVALID_LOCATOR,
+          `Cannot delete block ${idx}: it is inside a content control (w:sdt). Edit the content control in place by index/anchor instead.`,
+        );
       }
-      targets.add(body[bodyIdxs[idx]]);
+      targets.add(ref.element);
     }
     for (const anchor of anchors) {
       targets.add(resolveAnchor(anchorIndex, anchor).element);
@@ -2261,7 +2285,7 @@ export async function setParagraphFormats(
     const parsed = await parseDocXml(handle);
     const root = getDocumentRoot(parsed);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
     const anchorIndex = buildAnchorIndex(body);
 
     // Resolve each group's targets (indices and/or anchors) upfront.
@@ -2270,7 +2294,7 @@ export async function setParagraphFormats(
     for (const group of groups) {
       const elements: XNode[] = [];
       for (const idx of group.indices ?? []) {
-        elements.push(locatorToLocation(body, bodyIdxs, anchorIndex, { paragraphIndex: idx }).element);
+        elements.push(locatorToLocation(refs, anchorIndex, { paragraphIndex: idx }).element);
       }
       for (const anchor of group.anchors ?? []) {
         elements.push(resolveAnchor(anchorIndex, anchor).element);
@@ -3169,7 +3193,7 @@ export async function insertTable(
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
 
     // Build table XML nodes
     const tblChildren: XNode[] = [];
@@ -3222,18 +3246,9 @@ export async function insertTable(
 
     const tblNode = el("w:tbl", tblChildren);
 
-    // Insert at position
-    if (position < 0 || position >= bodyIdxs.length) {
-      const sectPrIdx = body.findIndex((n: XNode) => n["w:sectPr"]);
-      if (sectPrIdx !== -1) {
-        body.splice(sectPrIdx, 0, tblNode);
-      } else {
-        body.push(tblNode);
-      }
-    } else {
-      const bodyIdx = bodyIdxs[position];
-      body.splice(bodyIdx, 0, tblNode);
-    }
+    // Insert at position (unified block-index space; SDT-inner positions are
+    // refused, out-of-range appends before sectPr).
+    spliceNewParagraph(body, refs, position, [tblNode]);
 
     serializeDocXml(handle, parsed);
     await saveDocx(handle);
@@ -3304,12 +3319,12 @@ export async function setHeadings(
     const parsed = await parseDocXml(handle);
     const root = getDocumentRoot(parsed);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
     const anchorIndex = buildAnchorIndex(body);
 
     // Resolve every locator (index or anchor) upfront.
     const targets: XNode[] = items.map(
-      (item) => locatorToLocation(body, bodyIdxs, anchorIndex, item).element,
+      (item) => locatorToLocation(refs, anchorIndex, item).element,
     );
 
     const seeder = new AnchorSeeder(root, body);
@@ -3611,23 +3626,18 @@ export async function readHeaderFooter(filePath: string): Promise<string> {
  * additional sibling paragraphs.
  */
 function getTableCellParagraph(
-  body: XNode[],
-  bodyIdxs: number[],
+  refs: BlockRef[],
   blockIndex: number,
   rowIndex: number,
   colIndex: number,
 ): { paraEl: XNode; cellChildren: XNode[] } {
-  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
-    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
-  }
+  const ref = resolveBlockRef(refs, blockIndex);
 
-  const element = body[bodyIdxs[blockIndex]];
-
-  if (!element["w:tbl"]) {
+  if (!ref.element["w:tbl"]) {
     throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
   }
 
-  const tblChildren = element["w:tbl"] as XNode[];
+  const tblChildren = ref.element["w:tbl"] as XNode[];
   const rows = findAll(tblChildren, "w:tr");
 
   if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= rows.length) {
@@ -3676,12 +3686,12 @@ export async function editTableCells(
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
 
     // Validate all cells upfront and collect paragraph references
     const targets: { paraEl: XNode; cellChildren: XNode[]; newText: string; edit: EditTableCellItem }[] = [];
     for (const edit of edits) {
-      const { paraEl, cellChildren } = getTableCellParagraph(body, bodyIdxs, edit.blockIndex, edit.rowIndex, edit.colIndex);
+      const { paraEl, cellChildren } = getTableCellParagraph(refs, edit.blockIndex, edit.rowIndex, edit.colIndex);
       targets.push({ paraEl, cellChildren, newText: edit.newText, edit });
     }
 
@@ -3729,20 +3739,16 @@ export async function editTableCells(
 
 /** Resolve a cell to its <w:tc> children array, validating every index. */
 function getCellChildren(
-  body: XNode[],
-  bodyIdxs: number[],
+  refs: BlockRef[],
   blockIndex: number,
   rowIndex: number,
   colIndex: number,
 ): XNode[] {
-  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
-    throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
-  }
-  const element = body[bodyIdxs[blockIndex]];
-  if (!element["w:tbl"]) {
+  const ref = resolveBlockRef(refs, blockIndex);
+  if (!ref.element["w:tbl"]) {
     throw new EngineError(ErrorCode.NOT_A_TABLE, `Block ${blockIndex} is not a table.`);
   }
-  const rows = findAll(element["w:tbl"] as XNode[], "w:tr");
+  const rows = findAll(ref.element["w:tbl"] as XNode[], "w:tr");
   if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= rows.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
   }
@@ -3784,12 +3790,12 @@ export async function editTableParagraphs(
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
 
     // Resolve and validate every target paragraph upfront.
     const targets: XNode[] = [];
     for (const e of edits) {
-      const cellChildren = getCellChildren(body, bodyIdxs, e.blockIndex, e.rowIndex, e.colIndex);
+      const cellChildren = getCellChildren(refs, e.blockIndex, e.rowIndex, e.colIndex);
       const where = `cell [${e.rowIndex},${e.colIndex}] of block ${e.blockIndex}`;
       const paraEl = getCellParagraph(cellChildren, e.paragraphIndex, where);
       if (trackChanges && paragraphHasRevisions(paraEl["w:p"] as XNode[])) {
@@ -3838,13 +3844,13 @@ export async function deleteTableParagraphs(
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
 
     // Resolve and validate upfront, deduplicating by paragraph identity.
     const resolved: { cellChildren: XNode[]; paraEl: XNode }[] = [];
     const seen = new Set<XNode>();
     for (const t of targets) {
-      const cellChildren = getCellChildren(body, bodyIdxs, t.blockIndex, t.rowIndex, t.colIndex);
+      const cellChildren = getCellChildren(refs, t.blockIndex, t.rowIndex, t.colIndex);
       const where = `cell [${t.rowIndex},${t.colIndex}] of block ${t.blockIndex}`;
       const paraEl = getCellParagraph(cellChildren, t.paragraphIndex, where);
       if (trackChanges && paragraphHasRevisions(paraEl["w:p"] as XNode[])) {
@@ -3941,7 +3947,7 @@ export async function insertTableParagraphs(
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
     const body = getBody(parsed);
-    const bodyIdxs = blockBodyIndices(body);
+    const refs = enumerateBlockRefs(body);
 
     const ctx = trackChanges
       ? newRevisionContext((await scanMaxIdAcrossParts(handle, parsed)) + 1, author)
@@ -3959,7 +3965,7 @@ export async function insertTableParagraphs(
     }
     const resolved: Resolved[] = [];
     for (const ins of inserts) {
-      const cellChildren = getCellChildren(body, bodyIdxs, ins.blockIndex, ins.rowIndex, ins.colIndex);
+      const cellChildren = getCellChildren(refs, ins.blockIndex, ins.rowIndex, ins.colIndex);
       const paras = findAll(cellChildren, "w:p");
       const opts = resolveCellInsertOpts(paras, ins.numId, ins.numLevel, ins.copyFormatFrom);
       // buildNewParagraph returns one or more <w:p> (untracked multi-line input

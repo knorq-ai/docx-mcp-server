@@ -157,12 +157,19 @@ describe("ensure_anchors", () => {
     expect(r.blocks.every((b) => b.anchor && /^[0-9A-F]{8}$/.test(b.anchor) && parseInt(b.anchor, 16) > 0 && parseInt(b.anchor, 16) < 0x80000000)).toBe(true);
   });
 
-  it("does not anchor paragraphs inside a top-level w:sdt", async () => {
+  it("lists a top-level w:sdt paragraph in the unified block map but never anchors it", async () => {
     const p = await createDocWithSdt("inside the content control");
     const r = await ensureAnchorsStructured(p);
-    // blockBodyIndices excludes the sdt paragraph, so it isn't in blocks…
-    expect(r.blocks.every((b) => !b.textPreview.includes("inside the content control"))).toBe(true);
-    // …and it never receives a paraId.
+    // The SDT-contained paragraph IS enumerated (so the index column matches
+    // read_document / search_text — the M5 unification), but carries NO anchor:
+    // anchor scope is still direct-body paragraphs only.
+    const sdtBlock = r.blocks.find((b) => b.textPreview.includes("inside the content control"));
+    expect(sdtBlock).toBeDefined();
+    expect(sdtBlock?.anchor).toBeNull();
+    // The direct-body paragraph before it does get an anchor.
+    const bodyBlock = r.blocks.find((b) => b.textPreview.includes("Normal paragraph"));
+    expect(bodyBlock?.anchor).toBeTruthy();
+    // …and the SDT paragraph never receives a paraId in the XML.
     const xml = await readRawDocXml(p);
     const sdtPart = xml.slice(xml.indexOf("<w:sdt"));
     expect(sdtPart).not.toContain("w14:paraId");

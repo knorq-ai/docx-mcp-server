@@ -7,10 +7,11 @@
  * seeding, and resolving an anchor (or a paragraph index) to a concrete
  * location in the document body.
  *
- * v1 anchors cover only DIRECT-body paragraphs — the same set
- * `blockBodyIndices()` enumerates and every mutation tool resolves against.
- * Paragraphs inside tables or top-level `w:sdt` are not anchored (their ids, if
- * any, still count toward part-wide uniqueness).
+ * v1 anchors cover only DIRECT-body paragraphs. Paragraphs inside tables or
+ * top-level `w:sdt` are not anchored (their ids, if any, still count toward
+ * part-wide uniqueness). Note: block INDICES are resolved against the unified
+ * `enumerateBlockRefs()` space (which descends into `w:sdt`), so a paragraph's
+ * anchor scope and its printed block index are separate concerns.
  */
 
 import * as crypto from "crypto";
@@ -28,7 +29,11 @@ export interface ParagraphLocation {
   parent: XNode[];
   /** `element`'s index within `parent`. */
   bodyIndex: number;
-  /** 0-based blockBodyIndices position (paragraphs + tables), for messages. */
+  /**
+   * 0-based direct-body block position (paragraphs + tables advance it; SDT
+   * content is not counted here). Retained only as auxiliary metadata; tools
+   * resolve user-facing indices through `enumerateBlockRefs()` instead.
+   */
   blockIndex: number;
 }
 
@@ -140,9 +145,10 @@ export function ensureW14Namespace(root: XNode): boolean {
 }
 
 /**
- * List the locations of every DIRECT-body paragraph. `blockIndex` matches the
- * blockBodyIndices numbering (paragraphs and tables both advance it; tables are
- * not anchorable). Paragraphs inside tables / `w:sdt` are intentionally skipped.
+ * List the locations of every DIRECT-body paragraph (the anchor scope). The
+ * auxiliary `blockIndex` counts direct-body paragraphs and tables only (SDT
+ * content is not counted); user-facing block indices are resolved separately via
+ * `enumerateBlockRefs()`. Paragraphs inside tables / `w:sdt` are skipped here.
  */
 export function directBodyParagraphLocations(body: XNode[]): ParagraphLocation[] {
   const locations: ParagraphLocation[] = [];

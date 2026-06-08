@@ -275,6 +275,66 @@ export function enumerateBlocks(
   return blocks;
 }
 
+/**
+ * A resolved reference to one enumerated block, carrying not just the element
+ * but the array that directly holds it and its position in that array — enough
+ * to splice (insert/delete) at exactly the right spot.
+ *
+ * For a top-level `w:p`/`w:tbl` the container is the document body. For a
+ * paragraph inside a top-level `w:sdt`, the container is that SDT's
+ * `w:sdtContent` array.
+ */
+export interface BlockRef {
+  /** The block's `<w:p>` or `<w:tbl>` wrapper node. */
+  element: XNode;
+  /** The array that directly holds `element` (the body, or an sdtContent array). */
+  container: XNode[];
+  /** `element`'s index within `container`. */
+  indexInContainer: number;
+  type: "paragraph" | "table";
+}
+
+/**
+ * Enumerate blocks as `BlockRef`s in EXACTLY the order/indexing `enumerateBlocks`
+ * exposes (and that read_document / get_document_info / search_text /
+ * show_anchors report). This is the single canonical block-index space every
+ * index-consuming tool must resolve against.
+ *
+ * Walk: a top-level `w:p`/`w:tbl` is one block; a top-level `w:sdt` expands to
+ * its inner `w:p` children (each one block). Tables nested inside an SDT are not
+ * enumerated — matching `enumerateBlocks` (it descends into `w:sdtContent` only
+ * for `w:p`). For a body with no top-level `w:sdt` this yields exactly the same
+ * elements, in the same order, as the legacy `blockBodyIndices`-based resolution.
+ */
+export function enumerateBlockRefs(body: XNode[]): BlockRef[] {
+  const refs: BlockRef[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const child = body[i];
+    if (child["w:p"]) {
+      refs.push({ element: child, container: body, indexInContainer: i, type: "paragraph" });
+    } else if (child["w:tbl"]) {
+      refs.push({ element: child, container: body, indexInContainer: i, type: "table" });
+    } else if (child["w:sdt"]) {
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) {
+        const contentChildren = sdtContent["w:sdtContent"] as XNode[];
+        for (let j = 0; j < contentChildren.length; j++) {
+          if (contentChildren[j]["w:p"]) {
+            refs.push({
+              element: contentChildren[j],
+              container: contentChildren,
+              indexInContainer: j,
+              type: "paragraph",
+            });
+          }
+        }
+      }
+    }
+    // Skip sectPr and other non-content elements (consistent with enumerateBlocks).
+  }
+  return refs;
+}
+
 // ---------------------------------------------------------------------------
 // Cross-run text replacement
 // ---------------------------------------------------------------------------

@@ -105,7 +105,15 @@ export function getBody(parsed: XNode[]): XNode[] {
   return bodyEl["w:body"];
 }
 
-/** Returns the indices into the body array for content blocks (paragraphs + tables) */
+/**
+ * Returns the indices into the body array for content blocks (paragraphs +
+ * tables) at the TOP level only — it does NOT descend into `w:sdt`.
+ *
+ * @deprecated Superseded by `enumerateBlockRefs()` in `text.ts` for resolving
+ * user-facing block indices: this helper's numbering disagrees with
+ * read_document / search_text whenever a top-level `w:sdt` precedes a block,
+ * which previously caused wrong-block edits. Retained only for reference.
+ */
 export function blockBodyIndices(body: XNode[]): number[] {
   const indices: number[] = [];
   for (let i = 0; i < body.length; i++) {
