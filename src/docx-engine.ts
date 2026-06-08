@@ -3091,7 +3091,13 @@ export async function createDocument(
     // Build paragraphs from content
     let bodyXml = "";
     if (title) {
-      bodyXml += `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>${escapeXml(title)}</w:t></w:r></w:p>\n`;
+      // Normalize CRLF / lone CR (F3) so a "\r" can't survive inside the title
+      // <w:t> the way it does for content; render any "\n" as a soft break.
+      const titleRuns = normalizeNewlines(title)
+        .split("\n")
+        .map((seg) => escapeXml(seg))
+        .join('</w:t><w:br/><w:t xml:space="preserve">');
+      bodyXml += `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">${titleRuns}</w:t></w:r></w:p>\n`;
     }
 
     if (content) {

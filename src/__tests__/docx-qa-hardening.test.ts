@@ -1518,3 +1518,22 @@ describe("F4: insertTableParagraphs rejects a non-integer position", () => {
     expect(xmlIsWellFormed(p)).toBe(true);
   });
 });
+
+// F3 (Codex re-review): createDocument TITLE path was the one <w:t> writer that
+// still didn't normalize CRLF, so a "\r\n" in the title left a raw CR in <w:t>.
+describe("F3 (Codex re-review): createDocument title normalizes CRLF", () => {
+  it("a CRLF title leaves no raw carriage return and renders a newline as a soft break", async () => {
+    const p = await createTmpDoc("body", "Title\r\nLine2");
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toMatch(/\r/);
+    expect(xml).toContain("<w:br");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+  it("a single-line title is unchanged and well-formed", async () => {
+    const p = await createTmpDoc("body", "Single Title");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("Single Title");
+    expect(xml).not.toContain("<w:br");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});
