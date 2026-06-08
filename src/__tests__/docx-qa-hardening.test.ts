@@ -28,6 +28,7 @@ import {
   createDocument,
   editParagraphs,
   insertParagraphs,
+  insertTableParagraphs,
   replaceTexts,
   editTableCells,
   editTableParagraphs,
@@ -36,7 +37,15 @@ import {
   searchText,
   readTableStructure,
   readTableCell,
+  readTableCellStructured,
   getParagraphFormat,
+  getParagraphFormatStructured,
+  getDocumentInfoStructured,
+  ensureAnchors,
+  ensureAnchorsStructured,
+  rejectAllChanges,
+  listImages,
+  readComments,
   EngineError,
   ErrorCode,
   formatText,
@@ -743,5 +752,266 @@ describe("M3/M7: non-integer / wrong-type indices are rejected with INDEX_OUT_OF
         );
       });
     }
+  });
+});
+
+// =========================================================================
+// H3 — reject_all_changes must REMOVE a tracked paragraph-insertion, not
+//      leave an empty <w:p> shell (body + table); guard the last paragraph.
+// =========================================================================
+
+describe("H3: reject removes a tracked paragraph insertion (no residual empty <w:p>)", () => {
+  it("body: a single tracked insert + reject restores the pre-insert block count", async () => {
+    const p = await createTmpDoc("Existing only");
+    const before = (await getDocumentInfoStructured(p)).totalBlocks;
+    expect(before).toBe(1);
+
+    await insertParagraphs(p, [{ text: "Should disappear", position: -1 }], true);
+    await rejectAllChanges(p);
+
+    // Structured block count is back to the pre-insert value (NOT 2).
+    expect((await getDocumentInfoStructured(p)).totalBlocks).toBe(before);
+    // python-docx sees exactly one paragraph, with no trailing empty.
+    expect(pyBodyParagraphs(p)).toEqual(["Existing only"]);
+  });
+
+  it("body: two mid-document tracked inserts + reject leave no interleaved empties", async () => {
+    const p = await createTmpDoc("BASE0\nBASE1\nBASE2");
+    expect((await getDocumentInfoStructured(p)).totalBlocks).toBe(3);
+
+    await insertParagraphs(
+      p,
+      [
+        { text: "NEW-A", position: 1 },
+        { text: "NEW-B", position: 2 },
+      ],
+      true,
+      "R",
+    );
+    await rejectAllChanges(p);
+
+    expect((await getDocumentInfoStructured(p)).totalBlocks).toBe(3);
+    expect(pyBodyParagraphs(p)).toEqual(["BASE0", "BASE1", "BASE2"]);
+  });
+
+  it("table: a tracked cell insert + reject restores the original cell paragraphs", async () => {
+    const p = await createTmpDoc("lead");
+    await insertTable(p, -1, 2, 2, [["c1", "c2"], ["c3", "c4"]]);
+
+    // Body layout after append: block 0 = "lead" paragraph, block 1 = table.
+    const tableBlock = 1;
+    const cellBefore = await readTableCellStructured(p, tableBlock, 1, 1);
+    expect(cellBefore.paragraphs.map((x) => x.text)).toEqual(["c4"]);
+
+    await insertTableParagraphs(
+      p,
+      [{ blockIndex: tableBlock, rowIndex: 1, colIndex: 1, position: 9999, text: "T1\nT2" }],
+      true,
+      "R",
+    );
+    await rejectAllChanges(p);
+
+    const cellAfter = await readTableCellStructured(p, tableBlock, 1, 1);
+    expect(cellAfter.paragraphs.map((x) => x.text)).toEqual(["c4"]);
+  });
+
+  it("CONTROL: a single-line tracked text EDIT + reject still reverts cleanly", async () => {
+    const p = await createTmpDoc("HELLO");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "WORLD" }], true);
+    await rejectAllChanges(p);
+
+    expect((await getDocumentInfoStructured(p)).totalBlocks).toBe(1);
+    expect(pyBodyParagraphs(p)).toEqual(["HELLO"]);
+  });
+
+  it("GUARD: rejecting a tracked insert that is the cell's sole paragraph leaves a blank <w:p>", async () => {
+    // A 1×1 table whose only cell paragraph is itself a tracked insertion. The
+    // body's lead paragraph keeps a valid block 0; rejecting must not empty the
+    // <w:tc> of its required terminating <w:p>.
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:r><w:t>lead</w:t></w:r></w:p>
+<w:tbl>
+  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+  <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+  <w:tr>
+    <w:tc>
+      <w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>
+      <w:p>
+        <w:pPr><w:rPr><w:ins w:id="900" w:author="R" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>
+        <w:ins w:id="901" w:author="R" w:date="2024-01-01T00:00:00Z">
+          <w:r><w:t xml:space="preserve">sole inserted</w:t></w:r>
+        </w:ins>
+      </w:p>
+    </w:tc>
+  </w:tr>
+</w:tbl>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(p, documentXml);
+
+    await rejectAllChanges(p);
+
+    // The <w:tc> must still END with a <w:p> (OOXML CT_Tc requirement); python-docx
+    // opens it and the cell reads as empty (sole inserted text gone, blank para kept).
+    expect(pythonDocxOpens(p)).toBe(true);
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pyFirstCellText(p)).toBe("");
+    // No revision markers remain.
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:ins");
+  });
+});
+
+// =========================================================================
+// M6 — untracked multi-line split must carry the original w14:paraId onto
+//      the FIRST produced line so a captured/seeded anchor stays resolvable.
+// =========================================================================
+
+/** All w14:paraId values present in word/document.xml, in document order. */
+function paraIdsInXml(xml: string): string[] {
+  return [...xml.matchAll(/w14:paraId="([0-9A-Fa-f]+)"/g)].map((m) => m[1]);
+}
+
+describe("M6: untracked multi-line split keeps the captured anchor on the first line", () => {
+  it("first resulting line keeps the anchor; re-edit by it succeeds; no duplicate paraIds", async () => {
+    const p = await createTmpDoc("One\nTwo\nThree");
+    await ensureAnchors(p);
+    const seeded = await ensureAnchorsStructured(p);
+    const two = seeded.blocks.find((b) => b.textPreview === "Two");
+    expect(two?.anchor).toBeTruthy();
+    const anchorA = two!.anchor as string;
+
+    // Untracked multi-line edit on the anchored paragraph.
+    await editParagraphs(p, [{ anchor: anchorA, newText: "a\nb\nc" }], false);
+
+    const xml = await readRawDocXml(p);
+    const ids = paraIdsInXml(xml);
+    // The captured anchor survives on the first produced line.
+    expect(ids).toContain(anchorA);
+    // No duplicate paraIds were introduced by the split.
+    expect(new Set(ids).size).toBe(ids.length);
+
+    // Re-editing by the captured anchor must resolve (not ANCHOR_NOT_FOUND).
+    await editParagraphs(p, [{ anchor: anchorA, newText: "again" }], false);
+    const after = await readRawDocXml(p);
+    expect(after).toContain("again");
+    expect(paraIdsInXml(after)).toContain(anchorA);
+  });
+});
+
+// =========================================================================
+// M4 — the <json> structured block must be delimiter-safe: document text
+//      containing the literal "</json>" must not break extraction.
+// =========================================================================
+
+/** Extract the payload between the LAST "<json>" and the LAST "</json>". */
+function lastJsonPayload(output: string): string {
+  const open = output.lastIndexOf("<json>");
+  const close = output.lastIndexOf("</json>");
+  expect(open).toBeGreaterThanOrEqual(0);
+  expect(close).toBeGreaterThan(open);
+  return output.slice(open + "<json>".length, close);
+}
+
+describe("M4: <json> structured block is delimiter-safe against document text", () => {
+  it("searchText payload contains no literal </json> and round-trips the sentinel text", async () => {
+    // Build a doc whose paragraph AND cell text contain the literal "</json>".
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:r><w:t xml:space="preserve">para with &lt;/json&gt; needle</w:t></w:r></w:p>
+<w:tbl>
+  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+  <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+  <w:tr>
+    <w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>
+      <w:p><w:r><w:t xml:space="preserve">cell with &lt;/json&gt; needle</w:t></w:r></w:p>
+    </w:tc>
+  </w:tr>
+</w:tbl>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(p, documentXml);
+
+    const out = await searchText(p, "needle");
+    const payload = lastJsonPayload(out);
+
+    // The payload itself must not contain the delimiter literal.
+    expect(payload).not.toContain("</json>");
+    // It parses, and the decoded values round-trip the literal "</json>" text.
+    const parsed = JSON.parse(payload);
+    expect(parsed.totalMatches).toBeGreaterThanOrEqual(2);
+    const contexts = parsed.matches.map((m: { context: string }) => m.context).join(" ");
+    expect(contexts).toContain("</json>");
+  });
+});
+
+// =========================================================================
+// L2 — zero-result read tools must still emit a parseable <json> block.
+// =========================================================================
+
+describe("L2: zero-result read tools emit an empty <json> block", () => {
+  it("searchText with no match still emits parseable JSON with an empty array", async () => {
+    const p = await createTmpDoc("nothing to find here");
+    const out = await searchText(p, "zzz-no-match-zzz");
+    expect(out).toContain("No matches found");
+    const parsed = JSON.parse(lastJsonPayload(out));
+    expect(parsed.totalMatches).toBe(0);
+    expect(parsed.matches).toEqual([]);
+  });
+
+  it("listImages with no images still emits parseable JSON with an empty array", async () => {
+    const p = await createTmpDoc("no pictures");
+    const out = await listImages(p);
+    expect(out).toContain("No images found");
+    const parsed = JSON.parse(lastJsonPayload(out));
+    expect(parsed.totalImages).toBe(0);
+    expect(parsed.images).toEqual([]);
+  });
+
+  it("readComments with no comments still emits parseable JSON with an empty array", async () => {
+    const p = await createTmpDoc("uncommented");
+    const out = await readComments(p);
+    expect(out).toContain("No comments found");
+    const parsed = JSON.parse(lastJsonPayload(out));
+    expect(parsed.totalComments).toBe(0);
+    expect(parsed.comments).toEqual([]);
+  });
+});
+
+// =========================================================================
+// L3 — get_paragraph_format JSON must include resolved defaults (alignment /
+//      style / headingLevel) for a plain paragraph so it matches the text.
+// =========================================================================
+
+describe("L3: get_paragraph_format JSON carries explicit defaults for plain paragraphs", () => {
+  it("structured result has explicit alignment plus style/headingLevel keys", async () => {
+    const p = await createTmpDoc("plain unstyled paragraph");
+    const r = await getParagraphFormatStructured(p, 0);
+
+    // Explicit, not undefined — the JSON must agree with the "alignment left
+    // (default)" / "style default" the human text prints.
+    expect(r.alignment).toBe("left");
+    expect("style" in r).toBe(true);
+    expect("headingLevel" in r).toBe(true);
+    expect(r.style).toBeNull();
+    expect(r.headingLevel).toBeNull();
+
+    // And the serialized <json> the tool emits keeps those keys (not dropped).
+    const out = await getParagraphFormat(p, 0);
+    const parsed = JSON.parse(lastJsonPayload(out));
+    expect(parsed.alignment).toBe("left");
+    expect(Object.prototype.hasOwnProperty.call(parsed, "style")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "headingLevel")).toBe(true);
   });
 });

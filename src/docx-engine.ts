@@ -130,6 +130,25 @@ import {
 // ===========================================================================================
 
 /**
+ * Serialize `value` into a delimiter-safe `<json>…</json>` block (M4).
+ *
+ * `JSON.stringify` does not escape the angle-bracket characters, so document
+ * text that literally contains the `</json>` sequence would appear verbatim
+ * inside the payload and yield a second, ambiguous `</json>` that breaks
+ * extraction. We unicode-escape every "<" to "\\u003c" and ">" to "\\u003e" in
+ * the stringified output; this is still valid JSON that `JSON.parse` decodes
+ * back to the original characters, so consumers get correct data AND a literal
+ * `</json>` sequence can never occur inside the payload.
+ *
+ * Consumers should extract the LAST `<json>…</json>` pair in a tool's output
+ * (the structured block is always emitted last, after the human-readable prose).
+ */
+function jsonBlock(value: unknown): string {
+  const safe = JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  return "<json>\n" + safe + "\n</json>";
+}
+
+/**
  * Throw `PENDING_REVISIONS` with a consistent message pointing the caller
  * at `accept_all_changes` / `reject_all_changes`. Used by tracked-mode
  * editing operations that refuse to operate on paragraphs already
@@ -395,7 +414,7 @@ export async function ensureAnchors(filePath: string): Promise<string> {
     const a = b.anchor ? `@${b.anchor}` : "(no anchor)";
     out += `[${b.index}] ${a}${b.type === "table" ? " [table]" : ""} ${b.textPreview}\n`;
   }
-  out += "\n<json>\n" + JSON.stringify(r) + "\n</json>";
+  out += "\n" + jsonBlock(r);
   return out;
 }
 
@@ -474,7 +493,7 @@ export async function getDocumentInfo(filePath: string): Promise<string> {
     }
   }
 
-  output += "\n\n<json>\n" + JSON.stringify(info) + "\n</json>";
+  output += "\n\n" + jsonBlock(info);
   return output;
 }
 
@@ -547,7 +566,9 @@ export async function searchText(
   const result = await searchTextStructured(filePath, query, caseSensitive);
 
   if (result.totalMatches === 0) {
-    return `No matches found for "${query}" in ${result.file}.`;
+    // Still emit the structured block (zero totals / empty array) so a program
+    // that always parses the <json> block has a stable contract (L2).
+    return `No matches found for "${query}" in ${result.file}.\n\n` + jsonBlock(result);
   }
 
   let output = `Found ${result.totalMatches} match(es) for "${query}":\n\n`;
@@ -560,7 +581,7 @@ export async function searchText(
     output += `${loc}${a} ${m.context}\n`;
   }
 
-  output += "\n\n<json>\n" + JSON.stringify(result) + "\n</json>";
+  output += "\n\n" + jsonBlock(result);
   return output;
 }
 
@@ -877,7 +898,7 @@ export async function readTableStructure(filePath: string, blockIndex: number): 
     });
     out += "| " + parts.join(" | ") + " |\n";
   }
-  out += "\n<json>\n" + JSON.stringify(r) + "\n</json>";
+  out += "\n" + jsonBlock(r);
   return out;
 }
 
@@ -982,7 +1003,7 @@ export async function readTableCell(
     if (p.numId !== undefined) prefix += ` [num ${p.numId}/${p.numLevel ?? 0}]`;
     out += `${prefix} ${p.text}\n`;
   }
-  out += "\n<json>\n" + JSON.stringify(r) + "\n</json>";
+  out += "\n" + jsonBlock(r);
   return out;
 }
 
@@ -1028,10 +1049,12 @@ function intAttr(node: XNode | undefined, name: string): number | undefined {
 export interface ParagraphFormatResult {
   file: string;
   paragraphIndex: number;
-  style?: string;
-  headingLevel?: number;
-  /** Normalized: left | center | right | justify. */
-  alignment?: string;
+  /** Style id, or null for an unstyled (default) paragraph — always emitted (L3). */
+  style: string | null;
+  /** Heading level, or null when the paragraph is not a heading — always emitted (L3). */
+  headingLevel: number | null;
+  /** Normalized: left | center | right | justify. Defaults to "left", always emitted (L3). */
+  alignment: string;
   numId?: number;
   numLevel?: number;
   /** Indentation in twips (1440 = 1 inch), as accepted by set_paragraph_formats. */
@@ -1070,9 +1093,12 @@ export async function getParagraphFormatStructured(
   const result: ParagraphFormatResult = {
     file: path.basename(filePath),
     paragraphIndex,
-    style,
-    headingLevel: getHeadingLevel(style),
-    alignment: readAlignment(pChildren),
+    // Resolve explicit defaults so the serialized JSON matches the human text
+    // ("style default / alignment left (default)") instead of dropping the keys
+    // when the readers return undefined for an unstyled paragraph (L3).
+    style: style ?? null,
+    headingLevel: getHeadingLevel(style) ?? null,
+    alignment: readAlignment(pChildren) ?? "left",
   };
 
   const num = readNumbering(pChildren);
@@ -1126,7 +1152,7 @@ export async function getParagraphFormat(filePath: string, paragraphIndex: numbe
   if (r.spaceAfter !== undefined) spParts.push(`after ${r.spaceAfter}pt`);
   if (r.lineValue !== undefined) spParts.push(`line ${r.lineValue}${r.lineRule ? ` (${r.lineRule})` : ""}`);
   if (spParts.length) lines.push(`  spacing: ${spParts.join(", ")}`);
-  return lines.join("\n") + "\n\n<json>\n" + JSON.stringify(r) + "\n</json>";
+  return lines.join("\n") + "\n\n" + jsonBlock(r);
 }
 
 // ---------------------------------------------------------------------------
@@ -1496,6 +1522,13 @@ function replaceParagraphTextMultiline(
     if (lines[i]) kids.push(makeTextRun(lines[i], firstRPr));
     newParas.push(el("w:p", kids));
   }
+
+  // Carry the original paragraph's w14:paraId onto the FIRST produced line so a
+  // captured/seeded anchor keeps resolving after the split (M6). The other lines
+  // stay un-anchored, preserving paraId uniqueness (ensure_anchors seeds them
+  // later if needed). paraId lives on the <w:p> element, not inside pPr.
+  const originalParaId = attr(element, "w14:paraId");
+  if (originalParaId) setAttr(newParas[0], "w14:paraId", originalParaId);
 
   parent.splice(idx, 1, ...newParas);
 }
@@ -2018,7 +2051,7 @@ export async function insertParagraphs(
   const mode = trackChanges ? " (tracked)" : "";
   let out = `Inserted ${r.inserted} paragraph(s) in ${r.file}${mode}.`;
   if (r.newParagraphs.length > 0) {
-    out += "\n\n<json>\n" + JSON.stringify({ newParagraphs: r.newParagraphs }) + "\n</json>";
+    out += "\n\n" + jsonBlock({ newParagraphs: r.newParagraphs });
   }
   return out;
 }
@@ -2465,7 +2498,9 @@ export async function readComments(filePath: string): Promise<string> {
   const result = await readCommentsStructured(filePath);
 
   if (result.totalComments === 0) {
-    return `No comments found in ${result.file}.`;
+    // Emit the structured block (zero total / empty array) so the contract holds
+    // even when there are no comments (L2).
+    return `No comments found in ${result.file}.\n\n` + jsonBlock(result);
   }
 
   let output = `Comments in ${result.file} (${result.totalComments}):\n\n`;
@@ -2481,7 +2516,7 @@ export async function readComments(filePath: string): Promise<string> {
     formatComment(c, "");
   }
 
-  output += "\n<json>\n" + JSON.stringify(result) + "\n</json>";
+  output += "\n" + jsonBlock(result);
   return output;
 }
 
@@ -4015,7 +4050,9 @@ export async function listImages(filePath: string): Promise<string> {
   const result = await listImagesStructured(filePath);
 
   if (result.totalImages === 0) {
-    return `No images found in ${result.file}.`;
+    // Emit the structured block (zero total / empty array) so the contract holds
+    // even when there are no images (L2).
+    return `No images found in ${result.file}.\n\n` + jsonBlock(result);
   }
 
   let output = `Images in ${result.file} (${result.totalImages}):\n\n`;
@@ -4035,7 +4072,7 @@ export async function listImages(filePath: string): Promise<string> {
     output += "\n";
   }
 
-  output += "<json>\n" + JSON.stringify(result) + "\n</json>";
+  output += jsonBlock(result);
   return output;
 }
 

@@ -960,6 +960,21 @@ function restoreRunPropertyChanges(pChildren: XNode[]): void {
   }
 }
 
+/**
+ * Whether this paragraph's mark is a tracked INSERTION — i.e. its
+ * `w:pPr > w:rPr` carries a `<w:ins>` child. Word writes this when a whole
+ * paragraph is inserted as a tracked change (the inserted paragraph mark).
+ * Rejecting such a change must remove the entire `<w:p>`, not just strip the
+ * markers and leave an empty shell (H3).
+ */
+function isTrackedParagraphInsertion(pChildren: XNode[]): boolean {
+  const pPr = findOne(pChildren, "w:pPr");
+  if (!pPr) return false;
+  const rPr = findOne(pPr["w:pPr"] as XNode[], "w:rPr");
+  if (!rPr) return false;
+  return (rPr["w:rPr"] as XNode[]).some((c) => c["w:ins"] !== undefined);
+}
+
 /** Remove w:ins and w:del markers from pPr > rPr (paragraph break markers). */
 function cleanParagraphRevisionMarkers(pChildren: XNode[]): void {
   const pPr = findOne(pChildren, "w:pPr");
@@ -1106,6 +1121,21 @@ export function rejectChangesInNodes(nodes: XNode[]): void {
       nodes.splice(i, 1, ...runs);
     } else if (isRangeMarker(node)) {
       nodes.splice(i, 1);
+    } else if (node["w:p"] && isTrackedParagraphInsertion(node["w:p"] as XNode[])) {
+      // A tracked paragraph INSERTION: rejecting it removes the entire <w:p>,
+      // not just its inserted runs + markers (which would leave an empty shell
+      // and inflate the block/paragraph count — H3). GUARD: never delete the
+      // sole remaining <w:p> of the body or a cell (OOXML requires ≥1 <w:p> per
+      // cell, and a body needs a final paragraph) — strip it down to a blank
+      // paragraph instead so the container stays valid.
+      const paragraphCount = nodes.reduce((n, x) => (x["w:p"] !== undefined ? n + 1 : n), 0);
+      if (paragraphCount > 1) {
+        nodes.splice(i, 1);
+      } else {
+        const pChildren = node["w:p"] as XNode[];
+        rejectChangesInNodes(pChildren); // drop the inserted runs (w:ins removed above on recursion)
+        postProcessParagraphReject(pChildren); // strip the pPr>rPr insertion mark, leaving a blank <w:p>
+      }
     } else if (node["w:p"]) {
       const pChildren = node["w:p"] as XNode[];
       rejectChangesInNodes(pChildren);

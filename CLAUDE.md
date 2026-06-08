@@ -81,6 +81,10 @@ npx vitest run    # 全テスト実行
 
 `get_document_info`, `search_text`, `read_comments`, `list_images`, `read_table_structure`, `read_table_cell`, `get_paragraph_format` はテキストの後に `<json>...</json>` ブロックで構造化データを返す。LLM はテキスト部分で自然言語応答を構成し、プログラムは JSON 部分をパースして利用できる。
 
+- **抽出規約**: プログラムは出力中の**最後の** `<json>...</json>` ペアを取り出してパースすること（構造化ブロックは常にプロンプト末尾に置かれる）。ドキュメント本文が `</json>` リテラルを含んでも安全に取り出せるよう、JSON ペイロード内の `<` / `>` は `<` / `>` に unicode エスケープしてある（`JSON.parse` が元の文字に復元するため値は正しく round-trip する）。
+- **ゼロ件**: `search_text`（一致なし）, `list_images`（画像なし）, `read_comments`（コメントなし）も、件数 0・空配列の `<json>` ブロックを必ず出力する（常に機械可読な契約）。
+- **既定値**: `get_paragraph_format` は素の段落でも `alignment`（既定 `"left"`）, `style`（既定 `null`）, `headingLevel`（既定 `null`）を JSON に明示する（テキスト表示と一致させるため）。
+
 ## 書き込みロック
 
 書き込み関数は `withFileLock` でラップされており、同一ファイルへの並行書き込みを自動直列化する。読み取り関数はロック不要。
