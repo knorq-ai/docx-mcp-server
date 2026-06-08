@@ -219,11 +219,16 @@ describe("edit_table_cells newline handling", () => {
       [{ blockIndex: 1, rowIndex: 0, colIndex: 0, newText: "y1\ny2" }],
       false,
     );
-    const doc = await readDocument(p);
-    expect(doc).toContain("y1");
-    expect(doc).toContain("y2");
-    expect(doc).not.toContain("x1");
-    expect(doc).not.toContain("x3");
+    // Assert on the raw cell XML (ground truth), not readDocument output:
+    // readDocument embeds the absolute file Path, so a temp dir whose name
+    // happens to contain "x1"/"x3" (e.g. macOS /var/folders/.../h73hykpx0x1bd.../)
+    // would make a substring-absence check false-fail on some machines.
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("y1");
+    expect(xml).toContain("y2");
+    expect(xml).not.toContain("x1");
+    expect(xml).not.toContain("x2");
+    expect(xml).not.toContain("x3");
   });
 
   it("tracked: uses soft breaks within the cell paragraph", async () => {
