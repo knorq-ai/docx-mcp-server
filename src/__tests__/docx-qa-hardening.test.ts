@@ -30,9 +30,15 @@ import {
   insertParagraphs,
   replaceTexts,
   editTableCells,
+  editTableParagraphs,
   deleteTableParagraphs,
   insertTable,
   searchText,
+  readTableStructure,
+  readTableCell,
+  getParagraphFormat,
+  EngineError,
+  ErrorCode,
   formatText,
   highlightText,
 } from "../docx-engine.js";
@@ -217,14 +223,16 @@ describe("C2: illegal XML control characters are sanitized", () => {
     }
   });
 
-  it("preserves the LEGAL whitespace chars \\t \\r \\n", async () => {
-    // \r and \t are legal XML chars and must survive. \n is turned into a soft
-    // break / paragraph split upstream, so we assert \t and \r survive verbatim.
+  it("preserves the LEGAL whitespace char \\t verbatim (tabs are not line-ends)", async () => {
+    // \t is legal XML data and not a line-ending, so it must survive verbatim.
+    // \r and \n ARE line-ends: the edit pipeline normalizes them to breaks
+    // (see the H1 suite below), so they are not asserted to survive here. This
+    // is distinct from C2's job, which is stripping the *illegal* control set.
     const p = await createTmpDoc("seed");
-    await editParagraphs(p, [{ paragraphIndex: 0, newText: "tab\there\rcarriage" }], false);
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "tab\there and more" }], false);
     const xml = await readRawDocXml(p);
     expect(xml).toContain("\t");
-    expect(xml).toContain("\r");
+    expect(xml).toContain("tab\there and more");
     expect(xmlIsWellFormed(p)).toBe(true);
     expect(pythonDocxOpens(p)).toBe(true);
   });
@@ -408,5 +416,332 @@ describe("L1: insert_table clamp/pad behavior is documented", () => {
     // Overflow cell + overflow row are dropped (documented clamp).
     expect(xml).not.toContain("EXTRA");
     expect(xml).not.toContain("ROW3");
+  });
+});
+
+// =========================================================================
+// Newline fidelity + integer guards cluster (H1, M1, M2, M3, M7).
+//
+// H1 — CRLF / lone CR must normalize to "\n" before splitting so no raw \r
+//      (0x0D) survives inside a run, across every #4 edit/insert tool.
+// M1 — replace_texts must emit "\n" as a <w:br/> soft break (not a literal LF).
+// M2 — untracked editTableParagraphs must emit "\n" as a <w:br/> soft break,
+//      matching its tracked path.
+// M3/M7 — the #5/#6 navigation helpers must reject non-integer / wrong-type
+//      indices with EngineError(INDEX_OUT_OF_RANGE), never a raw TypeError and
+//      never a silent string-coercion mutation.
+// =========================================================================
+
+/** Count raw carriage-return (0x0D) bytes in the saved word/document.xml. */
+function rawCRCount(xml: string): number {
+  let n = 0;
+  for (let i = 0; i < xml.length; i++) if (xml.charCodeAt(i) === 0x0d) n++;
+  return n;
+}
+
+/** python-docx body paragraph texts (after XML §2.11 line-end normalization). */
+function pyBodyParagraphs(filePath: string): string[] {
+  const py = `
+import docx, json
+d = docx.Document(${JSON.stringify(filePath)})
+print(json.dumps([p.text for p in d.paragraphs]))
+`;
+  return JSON.parse(runPython(py));
+}
+
+/** python-docx text of the first cell of the first table. */
+function pyFirstCellText(filePath: string): string {
+  const py = `
+import docx, json
+d = docx.Document(${JSON.stringify(filePath)})
+print(json.dumps(d.tables[0].rows[0].cells[0].text))
+`;
+  return JSON.parse(runPython(py));
+}
+
+/**
+ * Build a doc whose block 0 is a plain paragraph and block 1 is a 1×1 table
+ * holding "ORIG". Lets a test target the table at a non-zero block index and
+ * detect silent mutation by a wrong-type ('1') index.
+ */
+async function createDocParaThenTable(): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:r><w:t>lead paragraph</w:t></w:r></w:p>
+<w:tbl>
+  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+  <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+  <w:tr>
+    <w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t>ORIG</w:t></w:r></w:p></w:tc>
+  </w:tr>
+</w:tbl>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  await writeMinimalDocx(p, documentXml);
+  return p;
+}
+
+describe("H1: CRLF / lone CR is normalized so no raw carriage return reaches a run", () => {
+  it("editParagraphs (untracked) splits CRLF into real <w:p> with zero raw \\r", async () => {
+    const p = await createTmpDoc("orig");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "a\r\nb\r\nc" }], false);
+
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    // python-docx sees three clean lines (no embedded newline char in any run).
+    expect(pyBodyParagraphs(p)).toEqual(["a", "b", "c"]);
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("editParagraphs (tracked) emits <w:br/> soft breaks with zero raw \\r", async () => {
+    const p = await createTmpDoc("orig");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "a\r\nb" }], true);
+
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(xml).toContain("<w:br/>");
+    // The inserted run text holds no embedded newline character.
+    expect(xml).not.toMatch(/<w:t[^>]*>[^<]*\n[^<]*<\/w:t>/);
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("editParagraphs normalizes a lone \\r (no \\n) into a paragraph break", async () => {
+    const p = await createTmpDoc("orig");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "a\rb" }], false);
+
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(pyBodyParagraphs(p)).toEqual(["a", "b"]);
+  });
+
+  it("insertParagraphs (untracked) splits CRLF with zero raw \\r", async () => {
+    const p = await createTmpDoc("anchor");
+    await insertParagraphs(p, [{ text: "ins1\r\nins2", position: -1 }], false);
+
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(pyBodyParagraphs(p)).toContain("ins1");
+    expect(pyBodyParagraphs(p)).toContain("ins2");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("editTableCells (untracked) splits CRLF cell text with zero raw \\r", async () => {
+    const p = await createTmpDoc("seed");
+    await insertTable(p, -1, 1, 1);
+    await editTableCells(p, [{ blockIndex: 1, rowIndex: 0, colIndex: 0, newText: "r1\r\nr2" }], false);
+
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    // Two real paragraphs in the cell → python-docx joins them with one "\n".
+    expect(pyFirstCellText(p)).toBe("r1\nr2");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("editTableCells (tracked) emits <w:br/> for CRLF with zero raw \\r", async () => {
+    const p = await createTmpDoc("seed");
+    await insertTable(p, -1, 1, 1);
+    await editTableCells(p, [{ blockIndex: 1, rowIndex: 0, colIndex: 0, newText: "r1\r\nr2" }], true);
+
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(xml).toContain("<w:br/>");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});
+
+describe("M1: replace_texts renders a replacement \\n as a soft break, not a literal LF", () => {
+  it("untracked replacement emits <w:br/> and no literal newline in <w:t>", async () => {
+    const p = await createTmpDoc("hello world");
+    await replaceTexts(p, [{ search: "world", replace: "big\nplanet" }], false);
+
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("<w:br/>");
+    // No <w:t> node contains an embedded newline character.
+    expect(xml).not.toMatch(/<w:t[^>]*>[^<]*\n[^<]*<\/w:t>/);
+    // python-docx still sees the break as a newline in the paragraph text.
+    expect(pyBodyParagraphs(p)[0]).toBe("hello big\nplanet");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("tracked replacement emits <w:br/> inside the <w:ins> run, no literal LF", async () => {
+    const p = await createTmpDoc("hello world");
+    await replaceTexts(p, [{ search: "world", replace: "big\nplanet" }], true, "QA");
+
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("<w:ins");
+    expect(xml).toContain("<w:br/>");
+    expect(xml).not.toMatch(/<w:t[^>]*>[^<]*\n[^<]*<\/w:t>/);
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("normalizes CRLF in the replacement (zero raw \\r)", async () => {
+    const p = await createTmpDoc("hello world");
+    await replaceTexts(p, [{ search: "world", replace: "big\r\nplanet" }], false);
+
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(xml).toContain("<w:br/>");
+  });
+});
+
+describe("M2: untracked editTableParagraphs renders \\n as a <w:br/> soft break", () => {
+  it("untracked produces one <w:p> with a <w:br/> between lines (no literal LF)", async () => {
+    const p = await createTmpDoc("seed");
+    await insertTable(p, -1, 1, 1);
+    await editTableParagraphs(
+      p,
+      [{ blockIndex: 1, rowIndex: 0, colIndex: 0, paragraphIndex: 0, newText: "AA\nBB" }],
+      false,
+    );
+
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("<w:br/>");
+    expect(xml).not.toMatch(/<w:t[^>]*>[^<]*\n[^<]*<\/w:t>/);
+    // Still a single cell paragraph (a soft break, not a paragraph split).
+    expect(pyFirstCellText(p)).toBe("AA\nBB");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("untracked matches the tracked path (both emit a <w:br/>)", async () => {
+    const pUn = await createTmpDoc("seed");
+    await insertTable(pUn, -1, 1, 1);
+    await editTableParagraphs(
+      pUn,
+      [{ blockIndex: 1, rowIndex: 0, colIndex: 0, paragraphIndex: 0, newText: "AA\nBB" }],
+      false,
+    );
+    const pTr = await createTmpDoc("seed");
+    await insertTable(pTr, -1, 1, 1);
+    await editTableParagraphs(
+      pTr,
+      [{ blockIndex: 1, rowIndex: 0, colIndex: 0, paragraphIndex: 0, newText: "AA\nBB" }],
+      true,
+    );
+    expect((await readRawDocXml(pUn)).includes("<w:br/>")).toBe(true);
+    expect((await readRawDocXml(pTr)).includes("<w:br/>")).toBe(true);
+  });
+
+  it("normalizes CRLF in untracked editTableParagraphs (zero raw \\r)", async () => {
+    const p = await createTmpDoc("seed");
+    await insertTable(p, -1, 1, 1);
+    await editTableParagraphs(
+      p,
+      [{ blockIndex: 1, rowIndex: 0, colIndex: 0, paragraphIndex: 0, newText: "AA\r\nBB" }],
+      false,
+    );
+    const xml = await readRawDocXml(p);
+    expect(rawCRCount(xml)).toBe(0);
+    expect(xml).toContain("<w:br/>");
+  });
+
+  it("the edit_table_paragraphs tool docs mention \\n behavior", async () => {
+    const src = await fs.readFile(new URL("../index.ts", import.meta.url), "utf8");
+    const idx = src.indexOf('"edit_table_paragraphs"');
+    expect(idx).toBeGreaterThan(-1);
+    const region = src.slice(idx, idx + 1600);
+    expect(region).toMatch(/\\n/);
+    expect(region).toMatch(/soft|break/i);
+  });
+});
+
+describe("M3/M7: non-integer / wrong-type indices are rejected with INDEX_OUT_OF_RANGE", () => {
+  const BAD: [string, unknown][] = [
+    ["fractional 1.5", 1.5],
+    ["NaN", NaN],
+    ["null", null],
+    ["string '1'", "1"],
+  ];
+
+  async function expectIndexError(fn: () => Promise<unknown>): Promise<void> {
+    let err: unknown;
+    try {
+      await fn();
+    } catch (e) {
+      err = e;
+    }
+    expect(err, "expected a throw").toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INDEX_OUT_OF_RANGE);
+  }
+
+  describe("editTableCells", () => {
+    for (const [label, val] of BAD) {
+      it(`rejects blockIndex=${label}`, async () => {
+        const p = await createDocParaThenTable();
+        await expectIndexError(() =>
+          editTableCells(p, [{ blockIndex: val as number, rowIndex: 0, colIndex: 0, newText: "x" }], false),
+        );
+      });
+      it(`rejects rowIndex=${label}`, async () => {
+        const p = await createDocParaThenTable();
+        await expectIndexError(() =>
+          editTableCells(p, [{ blockIndex: 1, rowIndex: val as number, colIndex: 0, newText: "x" }], false),
+        );
+      });
+      it(`rejects colIndex=${label}`, async () => {
+        const p = await createDocParaThenTable();
+        await expectIndexError(() =>
+          editTableCells(p, [{ blockIndex: 1, rowIndex: 0, colIndex: val as number, newText: "x" }], false),
+        );
+      });
+    }
+
+    it("a wrong-type string blockIndex does NOT silently mutate the cell", async () => {
+      const p = await createDocParaThenTable();
+      // The table lives at block index 1; '1' must be rejected, not coerced.
+      await expect(
+        editTableCells(p, [{ blockIndex: "1" as unknown as number, rowIndex: "0" as unknown as number, colIndex: "0" as unknown as number, newText: "WROTE-VIA-STRING-INDEX" }], false),
+      ).rejects.toBeInstanceOf(EngineError);
+      // The on-disk cell text is untouched.
+      expect(pyFirstCellText(p)).toBe("ORIG");
+      const xml = await readRawDocXml(p);
+      expect(xml).not.toContain("WROTE-VIA-STRING-INDEX");
+    });
+  });
+
+  describe("readTableStructure", () => {
+    for (const [label, val] of BAD) {
+      it(`rejects blockIndex=${label}`, async () => {
+        const p = await createDocParaThenTable();
+        await expectIndexError(() => readTableStructure(p, val as number));
+      });
+    }
+  });
+
+  describe("readTableCell", () => {
+    for (const [label, val] of BAD) {
+      it(`rejects rowIndex=${label}`, async () => {
+        const p = await createDocParaThenTable();
+        await expectIndexError(() => readTableCell(p, 1, val as number, 0));
+      });
+      it(`rejects colIndex=${label}`, async () => {
+        const p = await createDocParaThenTable();
+        await expectIndexError(() => readTableCell(p, 1, 0, val as number));
+      });
+    }
+  });
+
+  describe("getParagraphFormat", () => {
+    for (const [label, val] of BAD) {
+      it(`rejects paragraphIndex=${label}`, async () => {
+        const p = await createTmpDoc("only paragraph");
+        await expectIndexError(() => getParagraphFormat(p, val as number));
+      });
+    }
+  });
+
+  describe("insertParagraphs copy_format_from", () => {
+    for (const [label, val] of BAD) {
+      it(`rejects copyFormatFrom=${label}`, async () => {
+        const p = await createTmpDoc("base paragraph");
+        await expectIndexError(() =>
+          insertParagraphs(p, [{ text: "new", position: 0, copyFormatFrom: val as number }], false),
+        );
+      });
+    }
   });
 });

@@ -114,6 +114,21 @@ export function sanitizeXmlText(text: string): string {
   return text.replace(ILLEGAL_XML_CHARS, "");
 }
 
+/**
+ * Normalize line endings to a lone "\n": collapse CRLF ("\r\n") and a bare
+ * carriage return ("\r") to "\n". Applied at the start of every edit/insert
+ * text pipeline BEFORE splitting on "\n" or building soft-break runs. Without
+ * it, a stray "\r" survives inside a <w:t>; a conformant reader (Word /
+ * python-docx, per XML 1.0 §2.11 line-end normalization) then turns it into a
+ * literal newline character in the run — rendered as whitespace, not the
+ * intended line/paragraph break. "\r" is XML-legal (sanitizeXmlText keeps it),
+ * so this normalization is specific to the edit-text pipeline and does not
+ * touch verbatim document content elsewhere.
+ */
+export function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
 /** Create a text node (illegal XML control chars are stripped here). */
 export function textNode(text: string): XNode {
   return { "#text": sanitizeXmlText(text) };

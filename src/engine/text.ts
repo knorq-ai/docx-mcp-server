@@ -12,6 +12,7 @@ import {
   textNode,
   cloneNode,
   sanitizeXmlText,
+  normalizeNewlines,
 } from "./xml-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -348,6 +349,50 @@ function collectRuns(pChildren: XNode[]): RunInfo[] {
 }
 
 /**
+ * Split any <w:r> whose <w:t> text contains "\n" into a run sequence with a
+ * <w:br/> soft break between segments, recursing into w:ins and w:sdt content.
+ * Used by the untracked replace path so a replacement that introduces a "\n"
+ * (which the in-place text rewrite would leave as a literal LF in a single
+ * <w:t>) renders as a real line break — matching the edit/insert tools and the
+ * tracked replace path. A run's own rPr is carried onto each produced segment.
+ * Only runs that actually contain "\n" are touched; all other nodes are left
+ * exactly as-is (order preserved).
+ */
+function splitRunsOnNewline(children: XNode[]): void {
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    if (child["w:r"]) {
+      const runC = child["w:r"] as XNode[];
+      // Concatenated text across this run's w:t nodes.
+      let text = "";
+      let hasT = false;
+      for (const rc of runC) {
+        if (rc["w:t"]) {
+          hasT = true;
+          for (const tn of rc["w:t"]) {
+            if (tn["#text"] !== undefined) text += String(tn["#text"]);
+          }
+        }
+      }
+      if (!hasT || !text.includes("\n")) continue;
+      // Only split runs whose sole non-rPr content is w:t (skip drawings, tabs,
+      // breaks, fields — preserving them verbatim is safer than rebuilding).
+      const onlyText = runC.every((rc) => rc["w:rPr"] !== undefined || rc["w:t"] !== undefined);
+      if (!onlyText) continue;
+      const rPr = getRunRPr(runC);
+      const replacement = makeTextRuns(text, rPr);
+      children.splice(i, 1, ...replacement);
+      i += replacement.length - 1;
+    } else if (child["w:ins"]) {
+      splitRunsOnNewline(child["w:ins"] as XNode[]);
+    } else if (child["w:sdt"]) {
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) splitRunsOnNewline(sdtContent["w:sdtContent"] as XNode[]);
+    }
+  }
+}
+
+/**
  * Replace `search` with `replace` inside the runs of a single paragraph.
  * Handles cross-run matches. Returns number of replacements made.
  */
@@ -363,7 +408,10 @@ export function replaceInParagraph(
   if (search.length === 0) return 0;
   // The untracked path writes `replace` straight into #text nodes (bypassing
   // textNode), so sanitize illegal XML control chars here at the entrypoint.
-  replace = sanitizeXmlText(replace);
+  // Normalize CRLF / lone CR so a replacement line break becomes a single "\n"
+  // (later turned into a <w:br/> soft break by splitRunsOnNewline), never a
+  // stray "\r" left inside a <w:t>.
+  replace = normalizeNewlines(sanitizeXmlText(replace));
 
   const runs = collectRuns(pChildren);
   if (runs.length === 0) return 0;
@@ -450,6 +498,11 @@ export function replaceInParagraph(
     }
   }
 
+  // If the replacement introduced a "\n", the in-place rewrite above left it as
+  // a literal LF inside a single <w:t>. Split those runs so each "\n" becomes a
+  // <w:br/> soft break (only needed when the replacement carried a newline).
+  if (replace.includes("\n")) splitRunsOnNewline(pChildren);
+
   return matches.length;
 }
 
@@ -509,7 +562,9 @@ export function makeTextRun(text: string, rPr: XNode | null): XNode {
  * that multi-line input renders as line breaks instead of a literal "\n".
  */
 export function makeTextRuns(text: string, rPr: XNode | null): XNode[] {
-  const lines = text.split("\n");
+  // Normalize CRLF / lone CR so a stray "\r" never survives inside a run; each
+  // "\n" then becomes a real w:br soft break.
+  const lines = normalizeNewlines(text).split("\n");
   const runs: XNode[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (i > 0) {
@@ -540,7 +595,8 @@ export function makeDelTextRun(text: string, rPr: XNode | null): XNode {
  * when the deletion is rejected (reject turns w:delText back into w:t).
  */
 export function makeDelTextRuns(text: string, rPr: XNode | null): XNode[] {
-  const lines = text.split("\n");
+  // Normalize CRLF / lone CR before splitting (mirrors makeTextRuns).
+  const lines = normalizeNewlines(text).split("\n");
   const runs: XNode[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (i > 0) {
@@ -782,7 +838,9 @@ function replaceInChildrenTracked(
         newNodes.push(wrapInDel(delRuns, ctx));
       }
       if (effectiveReplace) {
-        newNodes.push(wrapInIns([makeTextRun(effectiveReplace, run.rPr)], ctx));
+        // makeTextRuns (not makeTextRun) so an embedded "\n" in the replacement
+        // becomes a <w:br/> soft break inside the w:ins, not a literal LF.
+        newNodes.push(wrapInIns(makeTextRuns(effectiveReplace, run.rPr), ctx));
       }
       if (afterText) newNodes.push(makeTextRun(afterText, run.rPr));
 
@@ -809,8 +867,10 @@ function replaceInChildrenTracked(
       newNodes.push(wrapInDel(delRuns, ctx));
       const firstRun = runs[firstRunIdx];
       if (effectiveReplace) {
+        // makeTextRuns so a "\n" in the replacement renders as a <w:br/> soft
+        // break inside the w:ins rather than a literal LF.
         newNodes.push(
-          wrapInIns([makeTextRun(effectiveReplace, firstRun.rPr)], ctx),
+          wrapInIns(makeTextRuns(effectiveReplace, firstRun.rPr), ctx),
         );
       }
 

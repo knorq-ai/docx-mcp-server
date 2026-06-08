@@ -32,6 +32,7 @@ import {
   el,
   textNode,
   cloneNode,
+  normalizeNewlines,
 } from "./engine/xml-helpers.js";
 import {
   ErrorCode,
@@ -752,7 +753,7 @@ export async function searchTextStructured(
 
 /** Resolve a table block to its <w:tbl> children, validating index and type. */
 function getTableChildren(body: XNode[], bodyIdxs: number[], blockIndex: number): XNode[] {
-  if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
+  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
   }
   const element = body[bodyIdxs[blockIndex]];
@@ -913,11 +914,11 @@ function getTableCellChildren(
 ): XNode[] {
   const tblChildren = getTableChildren(body, bodyIdxs, blockIndex);
   const rows = findAll(tblChildren, "w:tr");
-  if (rowIndex < 0 || rowIndex >= rows.length) {
+  if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= rows.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
   }
   const cells = findAll(rows[rowIndex]["w:tr"] as XNode[], "w:tc");
-  if (colIndex < 0 || colIndex >= cells.length) {
+  if (!Number.isInteger(colIndex) || colIndex < 0 || colIndex >= cells.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${colIndex} out of range (0–${cells.length - 1}).`);
   }
   return cells[colIndex]["w:tc"] as XNode[];
@@ -1056,7 +1057,7 @@ export async function getParagraphFormatStructured(
   const body = getBody(parsed);
   const bodyIdxs = blockBodyIndices(body);
 
-  if (paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
+  if (!Number.isInteger(paragraphIndex) || paragraphIndex < 0 || paragraphIndex >= bodyIdxs.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${paragraphIndex} out of range (0–${bodyIdxs.length - 1}).`);
   }
   const element = body[bodyIdxs[paragraphIndex]];
@@ -1328,6 +1329,10 @@ function replaceParagraphText(
   newText: string,
   ctx: RevisionContext | null,
 ): void {
+  // Normalize CRLF / lone CR up-front so no stray "\r" reaches a run and every
+  // "\n" is handled consistently (soft break) by both the tracked diff path and
+  // the untracked single-paragraph rebuild below.
+  newText = normalizeNewlines(newText);
   const pChildren = element["w:p"] as XNode[];
   const pPr = findOne(pChildren, "w:pPr");
 
@@ -1388,13 +1393,18 @@ function replaceParagraphText(
     if (diff.suffix) newChildren.push(...makeTextRuns(diff.suffix, firstRPr));
     element["w:p"] = newChildren;
   } else {
-    const newRun = el("w:r", [
-      el("w:t", [textNode(newText)], { "xml:space": "preserve" }),
-    ]);
+    // Untracked, single-paragraph rebuild (used by editTableParagraphs and the
+    // tracked-cell fallthrough). A "\n" becomes a <w:br/> soft break — NOT a
+    // paragraph split — because this editor addresses one <w:p> within a cell
+    // by a cell-local index; splitting would change the cell's paragraph count.
+    // This mirrors the tracked branch's makeTextRuns behavior so the two modes
+    // agree (was: the whole newText wrapped verbatim in one <w:t>, leaving a
+    // literal LF that Word renders as whitespace).
+    const firstRPr = firstRunRPr(pChildren);
     const newChildren: XNode[] = [];
     if (pPr) newChildren.push(pPr);
     newChildren.push(...structuralElements);
-    newChildren.push(newRun);
+    newChildren.push(...makeTextRuns(newText, firstRPr));
     element["w:p"] = newChildren;
   }
 }
@@ -1457,6 +1467,9 @@ function replaceParagraphTextMultiline(
   newText: string,
   ctx: RevisionContext | null,
 ): void {
+  // Normalize CRLF / lone CR first so the "\n" split decision below sees a
+  // bare "\r" (no "\n") as a line break too, not a stray carriage return.
+  newText = normalizeNewlines(newText);
   if (ctx || !newText.includes("\n")) {
     replaceParagraphText(element, newText, ctx);
     return;
@@ -1519,6 +1532,9 @@ function ensureCellEndsWithParagraph(cellChildren: XNode[]): void {
  * newText yields a single empty <w:p>), as OOXML requires.
  */
 function replaceCellContentUntracked(cellChildren: XNode[], newText: string): void {
+  // Normalize CRLF / lone CR so each line splits into a real <w:p> with no
+  // stray "\r" left inside a run.
+  newText = normalizeNewlines(newText);
   const firstPara = cellChildren.find((c: XNode) => c["w:p"]);
   const firstPChildren = firstPara ? (firstPara["w:p"] as XNode[]) : null;
   const pPr = firstPChildren ? findOne(firstPChildren, "w:pPr") : null;
@@ -1659,6 +1675,9 @@ function buildNewParagraph(
   ctx: RevisionContext | null,
   opts?: BuildParagraphOptions,
 ): XNode[] {
+  // Normalize CRLF / lone CR so the "\n" handling below (untracked split /
+  // tracked w:br) sees clean newlines and no stray "\r" reaches a run.
+  text = normalizeNewlines(text);
   if (!ctx && text.includes("\n")) {
     return text.split("\n").map((line) => {
       const pChildren: XNode[] = [];
@@ -1825,7 +1844,7 @@ function resolveInsertOpts(
   copyFormatFrom?: number,
 ): BuildParagraphOptions | undefined {
   if (copyFormatFrom !== undefined) {
-    if (copyFormatFrom < 0 || copyFormatFrom >= bodyIdxs.length) {
+    if (!Number.isInteger(copyFormatFrom) || copyFormatFrom < 0 || copyFormatFrom >= bodyIdxs.length) {
       throw new EngineError(
         ErrorCode.INDEX_OUT_OF_RANGE,
         `copy_format_from index ${copyFormatFrom} out of range (0–${bodyIdxs.length - 1}).`,
@@ -3563,7 +3582,7 @@ function getTableCellParagraph(
   rowIndex: number,
   colIndex: number,
 ): { paraEl: XNode; cellChildren: XNode[] } {
-  if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
+  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
   }
 
@@ -3576,14 +3595,14 @@ function getTableCellParagraph(
   const tblChildren = element["w:tbl"] as XNode[];
   const rows = findAll(tblChildren, "w:tr");
 
-  if (rowIndex < 0 || rowIndex >= rows.length) {
+  if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= rows.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Row index ${rowIndex} out of range (0–${rows.length - 1}).`);
   }
 
   const row = rows[rowIndex];
   const cells = findAll(row["w:tr"], "w:tc");
 
-  if (colIndex < 0 || colIndex >= cells.length) {
+  if (!Number.isInteger(colIndex) || colIndex < 0 || colIndex >= cells.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Column index ${colIndex} out of range (0–${cells.length - 1}).`);
   }
 

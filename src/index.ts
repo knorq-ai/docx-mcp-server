@@ -1361,7 +1361,7 @@ const tableUntrackedFlag = z
 
 server.tool(
   "edit_table_paragraphs",
-  "Edit one specific paragraph inside a table cell (addressed by a cell-local paragraph_index), without replacing the whole cell. Use this to surgically change a single line of a multi-paragraph cell (e.g. one item of a numbered list) while leaving the others untouched. paragraph_index counts only the cell's paragraphs (0-based); see read_table_cell. row/col are physical w:tc positions.",
+  "Edit one specific paragraph inside a table cell (addressed by a cell-local paragraph_index), without replacing the whole cell. Use this to surgically change a single line of a multi-paragraph cell (e.g. one item of a numbered list) while leaving the others untouched. paragraph_index counts only the cell's paragraphs (0-based); see read_table_cell. row/col are physical w:tc positions. A '\\n' in new_text renders as a soft line break (<w:br/>) within the same paragraph for BOTH tracked and untracked edits — it does NOT split the cell into extra paragraphs (which would change the cell's paragraph_index numbering); use edit_table_cells if you want untracked '\\n' to create separate cell paragraphs.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     edits: z
@@ -1371,7 +1371,7 @@ server.tool(
           row_index: z.number().describe("Zero-based row index"),
           col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
           paragraph_index: z.number().describe("Zero-based paragraph index within the cell"),
-          new_text: z.string().describe("New text content for that paragraph"),
+          new_text: z.string().describe("New text content for that paragraph. '\\n' renders as a soft line break (<w:br/>) within the same paragraph — see tool description."),
         }),
       )
       .describe("Array of table-paragraph edits"),
