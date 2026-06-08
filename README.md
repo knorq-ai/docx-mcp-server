@@ -41,6 +41,8 @@ Paragraphs are normally addressed by integer block index, but every insert/delet
 
 v1 anchors cover top-level (direct-body) paragraphs; paragraphs inside tables or content controls are not anchored.
 
+For a document containing a top-level content control (`w:sdt`), block indices are unified across read/search/edit so every tool agrees on the same numbering, and inserting or deleting a paragraph whose index falls inside an SDT is refused (edit it in place by index instead) — see the CHANGELOG entry "Unified block-index space".
+
 ### Page layout
 
 `get_page_layout` / `set_page_layout` support:

@@ -288,7 +288,7 @@ function locatorToLocation(
   if (!ref.element["w:p"]) {
     throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${idx} is not a paragraph (it may be a table).`);
   }
-  return { element: ref.element, parent: ref.container, bodyIndex: ref.indexInContainer, blockIndex: idx };
+  return { element: ref.element, parent: ref.container, bodyIndex: ref.indexInContainer };
 }
 
 /**
@@ -1654,13 +1654,17 @@ export async function editParagraphs(
     // Resolve and validate every locator (index or anchor) upfront. Element
     // references (not indices) are held because an untracked multi-line edit
     // splices new sibling paragraphs into the body, shifting later indices.
+    // `directBody` records whether each target is a DIRECT-body paragraph; only
+    // those are in anchor scope (v1), so only those auto-seed (M-rev).
     const targets: XNode[] = [];
+    const directBody = new Set<XNode>();
     for (const edit of edits) {
       const loc = locatorToLocation(refs, anchorIndex, edit);
       if (trackChanges && paragraphHasRevisions(loc.element["w:p"] as XNode[])) {
         throwPendingRevisions(`Paragraph ${describeLocator(edit)}`);
       }
       targets.push(loc.element);
+      if (loc.parent === body) directBody.add(loc.element);
     }
 
     const ctx = trackChanges
@@ -1677,7 +1681,11 @@ export async function editParagraphs(
       finalText.set(targets[i], edits[i].newText);
     }
     for (const [element, newText] of finalText) {
-      seeder.seed(element); // touched-paragraph auto-seed (kept by in-place single-line edits)
+      // Touched-paragraph auto-seed (kept by in-place single-line edits) — only
+      // for direct-body paragraphs. A paragraph inside a top-level w:sdt is out
+      // of anchor scope, so seeding it would write an unreachable, scope-
+      // violating w14:paraId onto the SDT-contained <w:p>.
+      if (directBody.has(element)) seeder.seed(element);
       replaceParagraphTextMultiline(body, element, newText, ctx);
     }
 
@@ -2295,15 +2303,23 @@ export async function setParagraphFormats(
     const anchorIndex = buildAnchorIndex(body);
 
     // Resolve each group's targets (indices and/or anchors) upfront.
+    // `directBody` records which targets are DIRECT-body paragraphs (anchor
+    // scope, v1); only those auto-seed. Anchor-resolved targets are always
+    // direct-body by construction; an index may resolve into a top-level w:sdt.
     const resolved: { elements: XNode[]; format: ParagraphFormat }[] = [];
+    const directBody = new Set<XNode>();
     let totalCount = 0;
     for (const group of groups) {
       const elements: XNode[] = [];
       for (const idx of group.indices ?? []) {
-        elements.push(locatorToLocation(refs, anchorIndex, { paragraphIndex: idx }).element);
+        const loc = locatorToLocation(refs, anchorIndex, { paragraphIndex: idx });
+        elements.push(loc.element);
+        if (loc.parent === body) directBody.add(loc.element);
       }
       for (const anchor of group.anchors ?? []) {
-        elements.push(resolveAnchor(anchorIndex, anchor).element);
+        const el = resolveAnchor(anchorIndex, anchor).element;
+        elements.push(el);
+        directBody.add(el);
       }
       if (elements.length === 0) {
         throw new EngineError(ErrorCode.INVALID_LOCATOR, `Each group must specify at least one of indices or anchors.`);
@@ -2312,12 +2328,12 @@ export async function setParagraphFormats(
       totalCount += elements.length;
     }
 
-    // Apply formatting and auto-seed the touched paragraphs.
+    // Apply formatting and auto-seed the touched paragraphs (direct-body only).
     const seeder = new AnchorSeeder(root, body);
     for (const { elements, format } of resolved) {
       for (const element of elements) {
         applyParagraphFormat(element["w:p"], format);
-        seeder.seed(element);
+        if (directBody.has(element)) seeder.seed(element);
       }
     }
 
@@ -3328,15 +3344,21 @@ export async function setHeadings(
     const refs = enumerateBlockRefs(body);
     const anchorIndex = buildAnchorIndex(body);
 
-    // Resolve every locator (index or anchor) upfront.
-    const targets: XNode[] = items.map(
-      (item) => locatorToLocation(refs, anchorIndex, item).element,
-    );
+    // Resolve every locator (index or anchor) upfront. `directBody` records
+    // which targets are DIRECT-body paragraphs (anchor scope, v1); only those
+    // auto-seed. An anchor target is always direct-body; an index may resolve
+    // into a top-level w:sdt, which is out of anchor scope.
+    const directBody = new Set<XNode>();
+    const targets: XNode[] = items.map((item) => {
+      const loc = locatorToLocation(refs, anchorIndex, item);
+      if (loc.parent === body) directBody.add(loc.element);
+      return loc.element;
+    });
 
     const seeder = new AnchorSeeder(root, body);
     targets.forEach((element, i) => {
       applyHeadingLevel(element["w:p"] as XNode[], items[i].level);
-      seeder.seed(element);
+      if (directBody.has(element)) seeder.seed(element);
     });
 
     serializeDocXml(handle, parsed);

@@ -18,6 +18,7 @@ import { execFileSync } from "child_process";
 import * as fs from "fs/promises";
 import {
   createTmpDoc,
+  createDocWithSdt,
   cleanupTmpFiles,
   readRawDocXml,
   tmpDocxPath,
@@ -27,6 +28,8 @@ import {
 import {
   createDocument,
   editParagraphs,
+  setHeadings,
+  setParagraphFormats,
   insertParagraphs,
   insertTableParagraphs,
   replaceTexts,
@@ -35,6 +38,7 @@ import {
   deleteTableParagraphs,
   insertTable,
   searchText,
+  searchTextStructured,
   readTableStructure,
   readTableCell,
   readTableCellStructured,
@@ -1061,5 +1065,176 @@ describe("M7 residual: non-integer insert position / copy_format_from rejected c
     const xml = await readRawDocXml(p);
     expect(xml).toContain("appended-neg1");
     expect(xml).toContain("appended-large");
+  });
+});
+
+// =========================================================================
+// MEDIUM (three-stage review): editing an SDT-inner paragraph by its unified
+// block index must NOT seed a w14:paraId onto the SDT-contained <w:p>. Anchor
+// scope (v1) is direct-body paragraphs only; the SDT <w:p> is unreachable by
+// anchor (buildAnchorIndex skips it), so a seeded id there is scope-violating
+// AND useless. Normal direct-body edits must STILL auto-seed (no over-correct).
+//
+// Fixture: createDocWithSdt → block 0 = "Normal paragraph" (direct body),
+//          block 1 = the SDT-inner paragraph.
+// =========================================================================
+describe("SDT-inner paragraph edits do not seed a scope-violating anchor (v1)", () => {
+  /** The portion of document.xml inside the top-level <w:sdt>. */
+  function sdtPart(xml: string): string {
+    return xml.slice(xml.indexOf("<w:sdt"));
+  }
+
+  it("edit_paragraphs at an SDT-inner block index leaves the SDT <w:p> WITHOUT a paraId", async () => {
+    const p = await createDocWithSdt("inside the content control");
+    // Block 1 is the SDT-inner paragraph (block 0 is the direct-body paragraph).
+    await editParagraphs(p, [{ paragraphIndex: 1, newText: "edited inside sdt" }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("edited inside sdt"); // the edit DID land
+    expect(sdtPart(xml)).not.toContain("w14:paraId"); // …without seeding the SDT <w:p>
+  });
+
+  it("set_headings at an SDT-inner block index leaves the SDT <w:p> WITHOUT a paraId", async () => {
+    const p = await createDocWithSdt("inside the content control");
+    await setHeadings(p, [{ paragraphIndex: 1, level: 1 }]);
+    const xml = await readRawDocXml(p);
+    expect(sdtPart(xml)).not.toContain("w14:paraId");
+  });
+
+  it("set_paragraph_formats at an SDT-inner block index leaves the SDT <w:p> WITHOUT a paraId", async () => {
+    const p = await createDocWithSdt("inside the content control");
+    await setParagraphFormats(p, [{ indices: [1], format: { alignment: "center" } }]);
+    const xml = await readRawDocXml(p);
+    expect(sdtPart(xml)).not.toContain("w14:paraId");
+  });
+
+  it("a NORMAL direct-body edit STILL seeds an anchor (guard against over-correction)", async () => {
+    const p = await createDocWithSdt("inside the content control");
+    // Block 0 is the direct-body "Normal paragraph".
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "Normal paragraph edited" }], false);
+    const xml = await readRawDocXml(p);
+    // The direct-body paragraph (everything before the SDT) MUST carry a paraId…
+    const beforeSdt = xml.slice(0, xml.indexOf("<w:sdt"));
+    expect(beforeSdt).toContain("w14:paraId");
+    expect(xml).toContain("xmlns:w14");
+    // …and the SDT paragraph still must NOT.
+    expect(sdtPart(xml)).not.toContain("w14:paraId");
+  });
+
+  it("set_headings / set_paragraph_formats on a direct-body block still seed (over-correction guard)", async () => {
+    const ph = await createDocWithSdt("inside the content control");
+    await setHeadings(ph, [{ paragraphIndex: 0, level: 1 }]);
+    const xmlH = await readRawDocXml(ph);
+    expect(xmlH.slice(0, xmlH.indexOf("<w:sdt"))).toContain("w14:paraId");
+
+    const pf = await createDocWithSdt("inside the content control");
+    await setParagraphFormats(pf, [{ indices: [0], format: { alignment: "center" } }]);
+    const xmlF = await readRawDocXml(pf);
+    expect(xmlF.slice(0, xmlF.indexOf("<w:sdt"))).toContain("w14:paraId");
+  });
+});
+
+// =========================================================================
+// LOW (three-stage review): a malformed numeric character reference in the
+// untrusted document.xml (code point > U+10FFFF, or a surrogate) must NOT
+// crash the read path with a RangeError surfaced as [INTERNAL_ERROR]. The
+// malformed ref is left as literal text so the document still parses; a VALID
+// numeric ref still decodes.
+// =========================================================================
+describe("malformed numeric character references read without throwing", () => {
+  /** A minimal doc whose body text is exactly `bodyText` (inserted verbatim). */
+  async function docWithBodyText(bodyText: string): Promise<string> {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body><w:p><w:r><w:t xml:space="preserve">${bodyText}</w:t></w:r></w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`;
+    await writeMinimalDocx(p, documentXml);
+    return p;
+  }
+
+  it("a > U+10FFFF hex ref and a huge decimal ref read without throwing (left as literal)", async () => {
+    const p = await docWithBodyText("before &#x110000; mid &#99999999999999; after");
+    // The read/parse path must not throw (previously: RangeError → INTERNAL_ERROR).
+    await expect(getDocumentInfoStructured(p)).resolves.toBeDefined();
+    // The paragraph text round-trips with the malformed refs left as literal text
+    // (lenient: not decoded, not dropped). Asserted on the structured fullText.
+    const r = await searchTextStructured(p, "before");
+    expect(r.matches).toHaveLength(1);
+    const text = r.matches[0].fullText;
+    expect(text).toContain("before");
+    expect(text).toContain("after");
+    expect(text).toContain("&#x110000;");
+    expect(text).toContain("&#99999999999999;");
+  });
+
+  it("a surrogate-range numeric ref (&#xD800;) reads without throwing (left as literal)", async () => {
+    const p = await docWithBodyText("xsurr &#xD800; ysurr");
+    await expect(getDocumentInfoStructured(p)).resolves.toBeDefined();
+    const r = await searchTextStructured(p, "xsurr");
+    expect(r.matches[0].fullText).toContain("&#xD800;");
+  });
+
+  it("a VALID numeric ref still decodes (&#65; and &#x41; → A)", async () => {
+    const p = await docWithBodyText("decval=&#65; hexval=&#x41;");
+    const r = await searchTextStructured(p, "decval");
+    expect(r.matches).toHaveLength(1);
+    expect(r.matches[0].fullText).toContain("decval=A");
+    expect(r.matches[0].fullText).toContain("hexval=A");
+  });
+});
+
+// =========================================================================
+// LOW (three-stage review): sanitizeXmlText must also drop U+FFFE/U+FFFF and
+// unpaired UTF-16 surrogates (all XML-1.0-illegal), while keeping valid
+// surrogate PAIRS (astral chars / emoji) intact. Verified end-to-end: the
+// written document.xml is well-formed (xmllint) and python-docx opens it.
+// =========================================================================
+describe("sanitizer strips noncharacters and lone surrogates, keeps astral pairs", () => {
+  it("a valid emoji (astral surrogate pair) SURVIVES intact and the file is well-formed", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await createDocument(p, "smile \u{1F600} end");
+    const xml = await readRawDocXml(p);
+    expect(/\u{1F600}/u.test(xml)).toBe(true); // emoji preserved
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("lone surrogates (\\uD800, \\uDFFF) and U+FFFE/U+FFFF are stripped; file stays well-formed", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    // A\uD800B\uDFFFC￾D￿E — only the ASCII letters may survive.
+    await createDocument(p, "A\uD800B\uDFFFC￾D￿E");
+    const xml = await readRawDocXml(p);
+    const m = xml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
+    const inner = m ? m[1] : "";
+    expect(inner).toBe("ABCDE"); // every illegal char removed, letters intact & in order
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("editParagraphs with the same illegal mix also yields a well-formed file", async () => {
+    const p = await createTmpDoc("seed");
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "X\uD800Y\uDFFFZ￿W" }], false);
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+    const xml = await readRawDocXml(p);
+    const m = xml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
+    expect(m ? m[1] : "").toBe("XYZW");
+  });
+
+  it("a valid pair followed by a lone surrogate keeps the pair, drops the lone one", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    // emoji (D83D DE00) then a lone high D800 then 'Z'.
+    await createDocument(p, "\u{1F600}\uD800Z");
+    const xml = await readRawDocXml(p);
+    const m = xml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
+    const inner = m ? m[1] : "";
+    expect(/\u{1F600}/u.test(inner)).toBe(true);
+    expect(inner).toContain("Z");
+    expect(/[\uD800-\uDFFF]/.test(inner.replace(/\u{1F600}/u, ""))).toBe(false);
+    expect(xmlIsWellFormed(p)).toBe(true);
   });
 });

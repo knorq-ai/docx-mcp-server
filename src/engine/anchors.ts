@@ -29,12 +29,6 @@ export interface ParagraphLocation {
   parent: XNode[];
   /** `element`'s index within `parent`. */
   bodyIndex: number;
-  /**
-   * 0-based direct-body block position (paragraphs + tables advance it; SDT
-   * content is not counted here). Retained only as auxiliary metadata; tools
-   * resolve user-facing indices through `enumerateBlockRefs()` instead.
-   */
-  blockIndex: number;
 }
 
 /**
@@ -145,21 +139,15 @@ export function ensureW14Namespace(root: XNode): boolean {
 }
 
 /**
- * List the locations of every DIRECT-body paragraph (the anchor scope). The
- * auxiliary `blockIndex` counts direct-body paragraphs and tables only (SDT
- * content is not counted); user-facing block indices are resolved separately via
- * `enumerateBlockRefs()`. Paragraphs inside tables / `w:sdt` are skipped here.
+ * List the locations of every DIRECT-body paragraph (the anchor scope).
+ * Paragraphs inside tables / `w:sdt` are skipped here; user-facing block indices
+ * are resolved separately via `enumerateBlockRefs()`.
  */
 export function directBodyParagraphLocations(body: XNode[]): ParagraphLocation[] {
   const locations: ParagraphLocation[] = [];
-  let blockIndex = 0;
   for (let i = 0; i < body.length; i++) {
-    const node = body[i];
-    if (node["w:p"]) {
-      locations.push({ element: node, parent: body, bodyIndex: i, blockIndex });
-      blockIndex++;
-    } else if (node["w:tbl"]) {
-      blockIndex++;
+    if (body[i]["w:p"]) {
+      locations.push({ element: body[i], parent: body, bodyIndex: i });
     }
   }
   return locations;

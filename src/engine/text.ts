@@ -304,7 +304,7 @@ export interface BlockRef {
  * its inner `w:p` children (each one block). Tables nested inside an SDT are not
  * enumerated — matching `enumerateBlocks` (it descends into `w:sdtContent` only
  * for `w:p`). For a body with no top-level `w:sdt` this yields exactly the same
- * elements, in the same order, as the legacy `blockBodyIndices`-based resolution.
+ * top-level paragraph/table elements, in the same order, as a plain body scan.
  */
 export function enumerateBlockRefs(body: XNode[]): BlockRef[] {
   const refs: BlockRef[] = [];

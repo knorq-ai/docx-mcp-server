@@ -93,6 +93,10 @@ prioritization — 6.4 medium, 6.7 low):
   commit: single version bump `3.1.0 → 3.2.0` (all-additive + bugfixes, no
   breaking changes), one CHANGELOG entry, README / README.ja / CLAUDE.md, tool
   count (33 + 3 + 3 + 1 = **40**).
+  - **Correction (M8):** the planning arithmetic above was off — the real
+    pre-consolidation base is **27** tools (not 33), so the shipped total is
+    **34** (= 27 + the consolidation's net additions), matching
+    README / CHANGELOG / the actual tool registration.
 - Baseline gate: `npm ci && npm run build && npx vitest run` green before any QA.
   Actual suite size is **349 tests** (the PRs' "305" was machine/point-in-time
   dependent). One pre-existing test (`docx-newline-handling.test.ts`,

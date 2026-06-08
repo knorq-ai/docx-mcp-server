@@ -5,8 +5,8 @@
  * (containing paragraphs) preceded a block:
  *   - read_document / get_document_info / search_text / ensure_anchors-by-index
  *     DESCEND into `w:sdt > w:sdtContent` and count each inner `w:p` as a block.
- *   - the index-consuming edit/table/format tools resolved a block index via
- *     `blockBodyIndices()`, which SKIPPED `w:sdt` entirely.
+ *   - the index-consuming edit/table/format tools resolved a block index via a
+ *     plain top-level body scan, which SKIPPED `w:sdt` entirely.
  * The off-by-N mismatch made the documented `search_text → edit_table_cells`
  * workflow silently edit the WRONG table (data corruption), or throw
  * NOT_A_TABLE / INDEX_OUT_OF_RANGE for indices the read tools call valid.
