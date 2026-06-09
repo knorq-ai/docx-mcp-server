@@ -646,6 +646,16 @@ describe("L1: insert_table clamp/pad behavior is documented", () => {
     expect(xml).not.toContain("EXTRA");
     expect(xml).not.toContain("ROW3");
   });
+
+  it("the insert_table `data` schema is bounded at the MCP boundary (≤1000 rows × ≤63 cols)", async () => {
+    const src = await fs.readFile(new URL("../index.ts", import.meta.url), "utf8");
+    const idx = src.indexOf('"insert_table"');
+    expect(idx).toBeGreaterThan(-1);
+    const region = src.slice(idx, idx + 1600);
+    // The `data` array must carry an outer .max (rows cap) and an inner .max
+    // (cols cap) so an enormous payload is rejected before the engine allocates.
+    expect(region).toMatch(/data:\s*z[\s\S]*?\.array\(\s*z\.array\(z\.string\(\)\)\.max\(\d+\)\s*\)[\s\S]*?\.max\(\d+\)/);
+  });
 });
 
 // =========================================================================
@@ -2608,5 +2618,222 @@ describe("Codex re-gate: hyperlink transparency on edit", () => {
     expect(xml).not.toContain("smarttext");
     expect(xml).toContain("NEW");
     expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});
+
+// =========================================================================
+// Inline-wrapper consistency: a <w:hyperlink>/<w:smartTag> is a TRANSPARENT
+// text container. Every paragraph-walking function must treat its inner runs
+// as part of the paragraph's content — exactly as the existing <w:sdt>
+// handling does — while KEEPING the wrapper element itself. This block proves
+// search / replace / format / tracked-delete / accept-reject / the revision
+// guard / comment anchoring all reach text inside a wrapper.
+// =========================================================================
+describe("Inline-wrapper (hyperlink/smartTag) transparency across paragraph walkers", () => {
+  const docWith = (inner: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${inner}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`;
+  const mk = async (inner: string): Promise<string> => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await writeMinimalDocx(p, docWith(inner));
+    return p;
+  };
+
+  // ---- (1) extractParagraphText: search SEES text inside wrappers ----------
+  it("search_text finds text inside a hyperlink (extractParagraphText descends)", async () => {
+    const p = await mk(
+      `<w:p><w:r><w:t xml:space="preserve">See </w:t></w:r><w:hyperlink r:id="rId9" w:history="1"><w:r><w:t xml:space="preserve">linktext</w:t></w:r></w:hyperlink></w:p>`,
+    );
+    const res = await searchTextStructured(p, "linktext");
+    expect(res.totalMatches).toBe(1);
+    expect(res.matches[0].fullText).toBe("See linktext");
+  });
+
+  it("search_text finds text inside a NESTED smartTag-in-hyperlink", async () => {
+    const p = await mk(
+      `<w:p><w:hyperlink r:id="rId9"><w:smartTag><w:r><w:t xml:space="preserve">deep</w:t></w:r></w:smartTag></w:hyperlink></w:p>`,
+    );
+    const res = await searchTextStructured(p, "deep");
+    expect(res.totalMatches).toBe(1);
+  });
+
+  // ---- (2) collectRuns: UNTRACKED replace reaches wrapper runs -------------
+  it("untracked replace_texts replaces text inside a hyperlink", async () => {
+    const p = await mk(
+      `<w:p><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">oldtext</w:t></w:r></w:hyperlink></w:p>`,
+    );
+    await replaceTexts(p, [{ search: "oldtext", replace: "newtext" }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("oldtext");
+    expect(xml).toContain("newtext");
+    expect(xml).toContain("<w:hyperlink"); // wrapper kept
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("untracked replace_texts replaces text inside a smartTag", async () => {
+    const p = await mk(
+      `<w:p><w:smartTag><w:r><w:t xml:space="preserve">oldtag</w:t></w:r></w:smartTag></w:p>`,
+    );
+    await replaceTexts(p, [{ search: "oldtag", replace: "newtag" }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("oldtag");
+    expect(xml).toContain("newtag");
+    expect(xml).toContain("<w:smartTag"); // wrapper kept
+  });
+
+  // ---- (3) splitRunsOnNewline: untracked replace with \n inside wrapper ----
+  it("untracked replace with a newline inside a hyperlink becomes a w:br", async () => {
+    const p = await mk(
+      `<w:p><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">oneline</w:t></w:r></w:hyperlink></w:p>`,
+    );
+    await replaceTexts(p, [{ search: "oneline", replace: "line1\nline2" }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("<w:br"); // newline rendered as a soft break, not a literal LF
+    expect(xml).not.toContain("line1\nline2"); // no literal LF left in a w:t
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  // ---- (4)+(5) collectRunsWithIndices + tracked replace inside wrapper -----
+  it("tracked replace_texts records del/ins for text inside a hyperlink", async () => {
+    const p = await mk(
+      `<w:p><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">oldlink</w:t></w:r></w:hyperlink></w:p>`,
+    );
+    await replaceTexts(p, [{ search: "oldlink", replace: "newlink" }], true, "Ed");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:del"); // old text tracked-deleted
+    expect(xml).toContain("w:ins"); // new text tracked-inserted
+    expect(xml).toContain("<w:hyperlink"); // wrapper kept
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("tracked replace_texts records del/ins for text inside a smartTag", async () => {
+    const p = await mk(
+      `<w:p><w:smartTag><w:r><w:t xml:space="preserve">oldtag</w:t></w:r></w:smartTag></w:p>`,
+    );
+    await replaceTexts(p, [{ search: "oldtag", replace: "newtag" }], true, "Ed");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:del");
+    expect(xml).toContain("w:ins");
+    expect(xml).toContain("<w:smartTag");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  // ---- (6) formatInParagraph: format reaches wrapper text ------------------
+  it("format_text formats text inside a hyperlink (bold applied to wrapper run)", async () => {
+    const p = await mk(
+      `<w:p><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">boldme</w:t></w:r></w:hyperlink></w:p>`,
+    );
+    await formatText(p, "boldme", { bold: true }, false);
+    const xml = await readRawDocXml(p);
+    // The formatted run must sit inside the hyperlink with a <w:b/> applied.
+    expect(/<w:hyperlink[\s\S]*<w:b\/?>[\s\S]*<\/w:hyperlink>/.test(xml)).toBe(true);
+    expect(xml).toContain("boldme"); // text preserved
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("format_text formats text inside a smartTag", async () => {
+    const p = await mk(
+      `<w:p><w:smartTag><w:r><w:t xml:space="preserve">italicme</w:t></w:r></w:smartTag></w:p>`,
+    );
+    await formatText(p, "italicme", { italic: true }, false);
+    const xml = await readRawDocXml(p);
+    expect(/<w:smartTag[\s\S]*<w:i\/?>[\s\S]*<\/w:smartTag>/.test(xml)).toBe(true);
+    expect(xml).toContain("italicme");
+  });
+
+  // ---- (7) markParagraphRunsAsDeleted: tracked delete marks wrapper runs ---
+  it("tracked delete_paragraphs marks runs INSIDE a hyperlink as deleted", async () => {
+    const p = await mk(
+      `<w:p><w:r><w:t xml:space="preserve">plain </w:t></w:r><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">linkword</w:t></w:r></w:hyperlink></w:p>` +
+        `<w:p><w:r><w:t xml:space="preserve">keep</w:t></w:r></w:p>`,
+    );
+    await deleteParagraphs(p, [0], true, "Ed");
+    const xml = await readRawDocXml(p);
+    // The hyperlink's text must be a tracked deletion (w:delText), not surviving as live w:t.
+    expect(xml).toContain("linkword");
+    expect(/<w:delText[^>]*>linkword<\/w:delText>/.test(xml)).toBe(true);
+    // After accepting, the wrapper text must be GONE (it was truly deleted).
+    await acceptAllChanges(p);
+    const accepted = await readRawDocXml(p);
+    expect(accepted).not.toContain("linkword");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  // ---- (8) strip/restoreRunPropertyChanges: rPrChange inside wrapper -------
+  it("accept clears a w:rPrChange nested inside a hyperlink run", async () => {
+    const p = await mk(
+      `<w:p><w:hyperlink r:id="rId9"><w:r><w:rPr><w:b/><w:rPrChange w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr/></w:rPrChange></w:rPr><w:t xml:space="preserve">styled</w:t></w:r></w:hyperlink></w:p>`,
+    );
+    await acceptAllChanges(p);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:rPrChange"); // cleared on accept
+    expect(/<w:b\/?>/.test(xml)).toBe(true); // current (accepted) bold kept
+    expect(xml).toContain("styled");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("reject restores w:rPr from a w:rPrChange nested inside a smartTag run", async () => {
+    const p = await mk(
+      `<w:p><w:smartTag><w:r><w:rPr><w:b/><w:rPrChange w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr/></w:rPrChange></w:rPr><w:t xml:space="preserve">styled</w:t></w:r></w:smartTag></w:p>`,
+    );
+    await rejectAllChanges(p);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:rPrChange"); // change element removed
+    expect(/<w:b\/?>/.test(xml)).toBe(false); // bold rejected → old (empty) rPr restored
+    expect(xml).toContain("styled");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  // ---- (9) paragraphHasRevisions: run-level w:rPrChange blocks tracked edit -
+  it("a run-level w:rPrChange (alone) blocks a tracked edit (guard matches doc-comment)", async () => {
+    const p = await mk(
+      `<w:p><w:r><w:rPr><w:b/><w:rPrChange w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr/></w:rPrChange></w:rPr><w:t xml:space="preserve">styled</w:t></w:r></w:p>`,
+    );
+    let err: unknown;
+    try {
+      await editParagraphs(p, [{ paragraphIndex: 0, newText: "X" }], true, "Ed");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.PENDING_REVISIONS);
+  });
+
+  it("a run-level w:rPrChange inside a hyperlink blocks a tracked edit", async () => {
+    const p = await mk(
+      `<w:p><w:hyperlink r:id="rId9"><w:r><w:rPr><w:rPrChange w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr/></w:rPrChange></w:rPr><w:t xml:space="preserve">styled</w:t></w:r></w:hyperlink></w:p>`,
+    );
+    let err: unknown;
+    try {
+      await editParagraphs(p, [{ paragraphIndex: 0, newText: "X" }], true, "Ed");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.PENDING_REVISIONS);
+  });
+
+  // ---- (10) insertCommentRangeMarkers: anchor inside a hyperlink -----------
+  it("add_comment range-wraps an anchor that sits inside a hyperlink", async () => {
+    const p = await mk(
+      `<w:p><w:r><w:t xml:space="preserve">before </w:t></w:r><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">anchorword</w:t></w:r></w:hyperlink><w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>`,
+    );
+    await addComment(p, "anchorword", "a note", "Rev");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:commentRangeStart");
+    expect(xml).toContain("w:commentRangeEnd");
+    // Precise wrap: the range markers should bracket the hyperlink, not the
+    // whole paragraph (the "before"/"after" runs stay outside the range).
+    const startIdx = xml.indexOf("w:commentRangeStart");
+    const endIdx = xml.indexOf("w:commentRangeEnd");
+    const beforeIdx = xml.indexOf("before ");
+    const afterIdx = xml.indexOf(" after");
+    expect(startIdx).toBeGreaterThan(beforeIdx); // range starts after the "before" run
+    expect(endIdx).toBeLessThan(afterIdx); // range ends before the "after" run
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
   });
 });

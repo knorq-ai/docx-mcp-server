@@ -2185,11 +2185,22 @@ function markParagraphRunsAsDeleted(pChildren: XNode[], ctx: RevisionContext): v
     }),
   );
 
-  // Convert all runs to w:del with w:delText
+  markChildRunsAsDeleted(pChildren, ctx);
+}
+
+/**
+ * Convert the direct `w:r` runs of a children array into a single trailing
+ * `<w:del>` of `<w:delText>` runs, and recurse into transparent inline wrappers
+ * (`w:hyperlink` / `w:smartTag`) so the runs inside them are marked deleted too
+ * — KEEPING the wrapper element itself. Without the wrapper recursion the link
+ * text would survive a tracked paragraph/table delete (accepting the delete
+ * would then leave orphaned hyperlink text behind).
+ */
+function markChildRunsAsDeleted(children: XNode[], ctx: RevisionContext): void {
   const delRuns: XNode[] = [];
   const indicesToRemove: number[] = [];
-  for (let i = 0; i < pChildren.length; i++) {
-    const child = pChildren[i];
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
     if (child["w:r"]) {
       const runC = child["w:r"] as XNode[];
       const rPr = getRunRPr(runC);
@@ -2198,17 +2209,23 @@ function markParagraphRunsAsDeleted(pChildren: XNode[], ctx: RevisionContext): v
         delRuns.push(makeDelTextRun(runText, rPr));
       }
       indicesToRemove.push(i);
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      // Recurse INTO the wrapper, converting its runs in place; the wrapper
+      // node is left in `children` so the link/smartTag survives the delete
+      // with its text now marked as a tracked deletion inside it.
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      markChildRunsAsDeleted(child[wtag] as XNode[], ctx);
     }
   }
 
   // Remove original runs (reverse order to preserve indices)
   for (let i = indicesToRemove.length - 1; i >= 0; i--) {
-    pChildren.splice(indicesToRemove[i], 1);
+    children.splice(indicesToRemove[i], 1);
   }
 
   // Append the w:del element with all deleted runs
   if (delRuns.length > 0) {
-    pChildren.push(wrapInDel(delRuns, ctx));
+    children.push(wrapInDel(delRuns, ctx));
   }
 }
 

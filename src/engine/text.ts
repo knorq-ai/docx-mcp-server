@@ -62,12 +62,12 @@ export function extractParagraphText(
   for (const child of pChildren) {
     if (child["w:r"]) {
       text += extractRunText(child["w:r"]);
-    } else if (child["w:hyperlink"]) {
-      for (const hlChild of child["w:hyperlink"]) {
-        if (hlChild["w:r"]) {
-          text += extractRunText(hlChild["w:r"]);
-        }
-      }
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      // Transparent inline wrappers: their inner content is part of the
+      // paragraph's text. Recurse so nested wrappers (smartTag-in-hyperlink),
+      // tracked runs, and further wrappers inside are all reached.
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      text += extractParagraphText(child[wtag] as XNode[], showRevisions);
     } else if (child["w:ins"]) {
       // Tracked insertions
       let insText = "";
@@ -157,6 +157,17 @@ export function paragraphHasRevisions(pChildren: XNode[]): boolean {
     if (child["w:del"] !== undefined) return true;
     if (child["w:moveFrom"] !== undefined) return true;
     if (child["w:moveTo"] !== undefined) return true;
+    // Run-level tracked formatting change: <w:r><w:rPr><w:rPrChange/>…. The
+    // doc-comment promises to detect rPrChange, and the accept/reject cleanup
+    // touches it, so a tracked edit landing on such a run would interleave new
+    // del/ins markup with the existing rPrChange. Refuse it like any other
+    // pending revision.
+    if (child["w:r"]) {
+      const rPr = findOne(child["w:r"] as XNode[], "w:rPr");
+      if (rPr && findOne(rPr["w:rPr"] as XNode[], "w:rPrChange") !== undefined) {
+        return true;
+      }
+    }
     // Recurse into inline structured-document-tags (Google Docs export
     // pattern) — the matcher follows w:sdtContent, so any revision
     // wrapper in there is exposed to the same corruption.
@@ -407,6 +418,12 @@ function collectRuns(pChildren: XNode[]): RunInfo[] {
         if (sdtContent) {
           collectFromChildren(sdtContent["w:sdtContent"] as XNode[]);
         }
+      } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+        // Transparent inline wrappers — recurse into their child array so the
+        // runs inside are collected for untracked replace (the wrapper element
+        // itself is preserved; only its inner #text nodes are rewritten).
+        const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+        collectFromChildren(child[wtag] as XNode[]);
       }
     }
   }
@@ -455,6 +472,11 @@ function splitRunsOnNewline(children: XNode[]): void {
     } else if (child["w:sdt"]) {
       const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
       if (sdtContent) splitRunsOnNewline(sdtContent["w:sdtContent"] as XNode[]);
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      // Transparent inline wrappers — split runs inside them too so a
+      // replacement that introduced a "\n" inside a wrapper becomes a soft break.
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      splitRunsOnNewline(child[wtag] as XNode[]);
     }
   }
 }
@@ -745,9 +767,12 @@ export interface RunWithIndex {
 export function collectRunsWithIndices(pChildren: XNode[]): RunWithIndex[] {
   const runs: RunWithIndex[] = [];
   let offset = 0;
-  // NOTE: w:sdt is NOT traversed here because splice operations use pIdx
-  // directly on the children array. SDT content is handled separately by
-  // replaceInParagraphTracked which recurses into each SDT's sdtContent.
+  // NOTE: w:sdt AND the transparent inline wrappers (w:hyperlink / w:smartTag)
+  // are NOT traversed here because splice operations use pIdx directly on the
+  // children array — the splice indices must address THIS array, not a nested
+  // one. Each wrapper's child array is an independent splice scope handled
+  // separately by replaceInParagraphTracked / formatInParagraph, which recurse
+  // into the wrapper and call the collector on the wrapper's own child array.
   for (let i = 0; i < pChildren.length; i++) {
     const child = pChildren[i];
     if (child["w:r"]) {
@@ -814,15 +839,24 @@ export function replaceInParagraphTracked(
 ): number {
   let count = replaceInChildrenTracked(pChildren, search, replace, caseSensitive, ctx);
 
-  // Recurse into w:sdt elements — each SDT's sdtContent is an independent splice scope
+  // Recurse into each nested splice scope — w:sdt content and the transparent
+  // inline wrappers (w:hyperlink / w:smartTag). Each is an independent children
+  // array, so its runs are replaced in place (splice indices address that array)
+  // while the wrapper element itself is preserved. Recurse through wrappers so a
+  // smartTag-inside-a-hyperlink is reached too.
   for (const child of pChildren) {
     if (child["w:sdt"]) {
       const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
       if (sdtContent) {
-        count += replaceInChildrenTracked(
+        count += replaceInParagraphTracked(
           sdtContent["w:sdtContent"] as XNode[], search, replace, caseSensitive, ctx,
         );
       }
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      count += replaceInParagraphTracked(
+        child[wtag] as XNode[], search, replace, caseSensitive, ctx,
+      );
     }
   }
 
@@ -1007,22 +1041,37 @@ function restoreFromChangeElement(
   }
 }
 
-/** Strip w:rPrChange from every w:r > w:rPr (accept mode). */
+/**
+ * Strip w:rPrChange from every w:r > w:rPr (accept mode), descending into the
+ * transparent inline wrappers (w:hyperlink / w:smartTag) so a tracked formatting
+ * change on a run INSIDE a wrapper is cleared too — mirroring the accept/reject
+ * traversal which already recurses into those wrappers structurally.
+ */
 function stripRunPropertyChanges(pChildren: XNode[]): void {
   for (const child of pChildren) {
     if (child["w:r"]) {
       const rPr = findOne(child["w:r"] as XNode[], "w:rPr");
       if (rPr) stripChangeElement(rPr["w:rPr"] as XNode[], "w:rPrChange");
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      stripRunPropertyChanges(child[wtag] as XNode[]);
     }
   }
 }
 
-/** Restore w:rPr from w:rPrChange for every run (reject mode). */
+/**
+ * Restore w:rPr from w:rPrChange for every run (reject mode), descending into
+ * transparent inline wrappers (w:hyperlink / w:smartTag) so a run inside a
+ * wrapper has its original formatting restored as well.
+ */
 function restoreRunPropertyChanges(pChildren: XNode[]): void {
   for (const child of pChildren) {
     if (child["w:r"]) {
       const rPr = findOne(child["w:r"] as XNode[], "w:rPr");
       if (rPr) restoreFromChangeElement(rPr["w:rPr"] as XNode[], "w:rPrChange", "w:rPr");
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      restoreRunPropertyChanges(child[wtag] as XNode[]);
     }
   }
 }

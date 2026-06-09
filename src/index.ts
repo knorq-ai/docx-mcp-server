@@ -1059,10 +1059,15 @@ server.tool(
       .max(63)
       .describe("Number of columns (1–63, Word's column limit; rows×cols must be ≤ 20000)"),
     data: z
-      .array(z.array(z.string()))
+      // Bound the payload at the MCP boundary too (the engine also clamps to
+      // rows×cols): cap the outer array to the row limit (1000) and each inner
+      // row to the column limit (63) so an enormous `data` is rejected here
+      // rather than allocated and walked. Mirrors MAX_TABLE_ROWS / MAX_TABLE_COLS.
+      .array(z.array(z.string()).max(63))
+      .max(1000)
       .optional()
       .describe(
-        "Optional 2D array of cell values, e.g. [['A1','B1'],['A2','B2']]. The table is always rows×cols: values beyond rows×cols are ignored (extra rows/columns dropped), and short rows are blank-padded.",
+        "Optional 2D array of cell values, e.g. [['A1','B1'],['A2','B2']]. The table is always rows×cols: values beyond rows×cols are ignored (extra rows/columns dropped), and short rows are blank-padded. Bounded to ≤1000 rows × ≤63 columns at the schema (matching the table dimension caps).",
       ),
   },
   async ({ file_path, position, rows, cols, data }) => {
