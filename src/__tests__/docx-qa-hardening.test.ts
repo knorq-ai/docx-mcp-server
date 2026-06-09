@@ -2467,3 +2467,30 @@ describe("N8: tracked delete of a whole table block", () => {
     expect(pythonDocxOpens(p)).toBe(true);
   });
 });
+
+// Round-4 review (medium): markRowAsDeleted must place the new <w:trPr> AFTER an
+// existing <w:tblPrEx> — CT_Row order is <w:tblPrEx>? then <w:trPr> then cells.
+describe("N8 follow-up: tracked table-row deletion preserves CT_Row child order", () => {
+  it("inserts <w:trPr> after an existing <w:tblPrEx> (not before)", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    const body =
+      `<w:p><w:r><w:t xml:space="preserve">before</w:t></w:r></w:p>` +
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>` +
+      `<w:tr><w:tblPrEx><w:tblW w:w="0" w:type="auto"/></w:tblPrEx>` +
+      `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`;
+    await writeMinimalDocx(p, documentXml);
+    await deleteParagraphs(p, [1], true, "Editor"); // tracked delete of the table block
+    const xml = await readRawDocXml(p);
+    const exIdx = xml.indexOf("<w:tblPrEx");
+    const prIdx = xml.indexOf("<w:trPr");
+    expect(exIdx).toBeGreaterThanOrEqual(0);
+    expect(prIdx).toBeGreaterThan(exIdx); // <w:trPr> comes AFTER <w:tblPrEx>
+    expect(/<w:trPr>[\s\S]*?<w:del/.test(xml)).toBe(true); // del marker is inside trPr
+    expect(xmlIsWellFormed(p)).toBe(true);
+    await acceptAllChanges(p); // accept removes the table entirely
+    expect((await getDocumentInfoStructured(p)).tables).toBe(0);
+  });
+});

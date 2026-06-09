@@ -1180,6 +1180,10 @@ export function acceptChangesInNodes(nodes: XNode[]): void {
       // delete (tracked)"; a bare splice would leave the nested <w:del> live.
       // Resolving the children first (accept removes nested w:del, unwraps any
       // nested w:ins) means only fully-resolved content reaches the node list.
+      // Recursion depth is bounded by document nesting depth, which the shared
+      // fast-xml-parser caps at maxNestedTags (default 100) — a deeper part is
+      // rejected at parse time, so this cannot be driven to a stack overflow
+      // from an untrusted .docx. (Keep that parser cap if changing the option.)
       acceptChangesInNodes(children);
       nodes.splice(i, 1, ...children);
     } else if (isRangeMarker(node)) {

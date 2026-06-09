@@ -2199,7 +2199,10 @@ function markRowAsDeleted(trChildren: XNode[], ctx: RevisionContext): void {
   let trPr = findOne(trChildren, "w:trPr");
   if (!trPr) {
     trPr = el("w:trPr");
-    trChildren.unshift(trPr); // w:trPr must be the first child of w:tr
+    // CT_Row child order is <w:tblPrEx>? then <w:trPr> then cells, so insert the
+    // new trPr AFTER an existing tblPrEx (findIndex === -1 → splice at 0 = unshift).
+    const tblPrExIdx = trChildren.findIndex((c: XNode) => c["w:tblPrEx"]);
+    trChildren.splice(tblPrExIdx + 1, 0, trPr);
   }
   const trPrChildren = trPr["w:trPr"] as XNode[];
   // Avoid a duplicate marker if one is somehow already present.
