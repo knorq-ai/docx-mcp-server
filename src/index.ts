@@ -637,10 +637,10 @@ server.tool(
     font_name: z.string().optional().describe("Font family name"),
     font_size: z
       .number()
-      .positive()
+      .min(0)
       .max(1638)
       .optional()
-      .describe("Font size in points (e.g. 12; 0–1638, Word's max)"),
+      .describe("Font size in points (e.g. 12; 0–1638, Word's max; 0 leaves size unset)"),
     font_color: z
       .string()
       .optional()

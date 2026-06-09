@@ -1203,6 +1203,11 @@ export function acceptChangesInNodes(nodes: XNode[]): void {
     } else if (node["w:sdt"]) {
       const sdtContent = findOne(node["w:sdt"] as XNode[], "w:sdtContent");
       if (sdtContent) acceptChangesInNodes(sdtContent["w:sdtContent"]);
+    } else if (node["w:hyperlink"] || node["w:smartTag"]) {
+      // Resolve tracked changes nested inside an inline wrapper (an edit tracked
+      // inside a hyperlink, or a revision left inside a restored hyperlink/smartTag).
+      const wtag = node["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      acceptChangesInNodes(node[wtag] as XNode[]);
     } else if (node["w:sectPr"]) {
       stripChangeElement(node["w:sectPr"] as XNode[], "w:sectPrChange");
     }
@@ -1262,6 +1267,11 @@ export function rejectChangesInNodes(nodes: XNode[]): void {
     } else if (node["w:sdt"]) {
       const sdtContent = findOne(node["w:sdt"] as XNode[], "w:sdtContent");
       if (sdtContent) rejectChangesInNodes(sdtContent["w:sdtContent"]);
+    } else if (node["w:hyperlink"] || node["w:smartTag"]) {
+      // Resolve tracked changes nested inside an inline wrapper (an edit tracked
+      // inside a hyperlink, or a revision left inside a restored hyperlink/smartTag).
+      const wtag = node["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      rejectChangesInNodes(node[wtag] as XNode[]);
     } else if (node["w:sectPr"]) {
       restoreFromChangeElement(node["w:sectPr"] as XNode[], "w:sectPrChange", "w:sectPr");
     }

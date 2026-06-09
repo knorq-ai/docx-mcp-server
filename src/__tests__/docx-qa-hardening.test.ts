@@ -2494,3 +2494,45 @@ describe("N8 follow-up: tracked table-row deletion preserves CT_Row child order"
     expect((await getDocumentInfoStructured(p)).tables).toBe(0);
   });
 });
+
+// Codex round-4 re-gate: a <w:hyperlink> is a TEXT container, so edit_paragraphs
+// must NOT preserve it as an opaque structural child (that duplicated the old
+// link text alongside the replacement). And tracked changes nested inside a
+// hyperlink must resolve on accept/reject.
+describe("Codex re-gate: hyperlink handling in edit + accept", () => {
+  const docWith = (inner: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${inner}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`;
+
+  it("edit_paragraphs replaces a hyperlink's text instead of duplicating it", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await writeMinimalDocx(
+      p,
+      docWith(
+        `<w:p><w:r><w:t xml:space="preserve">See </w:t></w:r><w:hyperlink r:id="rId99" w:history="1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t xml:space="preserve">the link text</w:t></w:r></w:hyperlink><w:r><w:t xml:space="preserve"> here</w:t></w:r></w:p>`,
+      ),
+    );
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "REPLACEMENT" }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("the link text"); // old hyperlink text replaced, not retained
+    expect((xml.match(/REPLACEMENT/g) ?? []).length).toBe(1); // exactly once — no duplication
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("accept resolves a tracked change nested inside a hyperlink (no w:ins residue)", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await writeMinimalDocx(
+      p,
+      docWith(
+        `<w:p><w:r><w:t xml:space="preserve">x </w:t></w:r><w:hyperlink r:id="rId9" w:history="1"><w:ins w:id="5" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">linktext</w:t></w:r></w:ins></w:hyperlink></w:p>`,
+      ),
+    );
+    await acceptAllChanges(p);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("w:ins"); // tracked insertion resolved
+    expect(xml).toContain("linktext"); // text kept
+    expect(xml).toContain("<w:hyperlink"); // link wrapper kept
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});

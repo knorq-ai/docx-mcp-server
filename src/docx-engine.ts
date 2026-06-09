@@ -1382,9 +1382,13 @@ function runIsStructural(runC: XNode[]): boolean {
 
 /**
  * True if a paragraph child must be preserved across a text replacement:
- * bookmark/comment range markers, a <w:fldSimple> field, a <w:hyperlink>
- * wrapper, or a <w:r> for which runIsStructural() holds. Mirrors the inline
- * preservation logic so all replacement paths agree (N4).
+ * bookmark/comment range markers, a <w:fldSimple> field, or a <w:r> for which
+ * runIsStructural() holds. Mirrors the inline preservation logic so all
+ * replacement paths agree (N4). NOTE: a <w:hyperlink> is deliberately NOT
+ * structural — it is a TEXT container (its visible text is part of the
+ * paragraph's editable text), so preserving it opaquely while inserting the
+ * replacement would duplicate the old link text. Editing a paragraph replaces
+ * a hyperlink's text like any other run (the long-standing behaviour).
  */
 function isStructuralParagraphChild(child: XNode): boolean {
   if (
@@ -1393,8 +1397,7 @@ function isStructuralParagraphChild(child: XNode): boolean {
     child["w:commentRangeStart"] !== undefined ||
     child["w:commentRangeEnd"] !== undefined ||
     child["w:commentReference"] !== undefined ||
-    child["w:fldSimple"] !== undefined ||
-    child["w:hyperlink"] !== undefined
+    child["w:fldSimple"] !== undefined
   ) {
     return true;
   }
