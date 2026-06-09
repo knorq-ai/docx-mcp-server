@@ -32,6 +32,11 @@ are unaffected by the block-index change noted under Changed.
 - **Index validation:** non-integer / wrong-type indices are rejected with `INDEX_OUT_OF_RANGE` everywhere (no raw `TypeError`; no silent string-coercion that mutated the wrong cell).
 - **`copy_format_from`** (in `insert_paragraphs` and the table-paragraph tools) no longer carries the source paragraph's stale tracked-change metadata (`w:pPrChange` / `pPr > rPr > w:rPrChange`) onto the new paragraph.
 - `ensure_anchors` block indices now match `read_document` / `search_text`.
+- **`insert_table`** rejects absurd / negative / non-integer `rows`/`cols` (and an oversized `data` payload) up front, so a single huge-table request can no longer exhaust memory and crash the shared stdio server; `set_headings`, `set_page_layout`, and `format_text` likewise validate their numeric inputs (integer heading levels, positive in-range page geometry / font size).
+- **`edit_paragraphs`** preserves a paragraph's footnote / endnote references and field codes across a text edit (previously dropped silently).
+- **`reply_to_comment`** declares the `w14` namespace on the comments part (a reply no longer yields a namespace-malformed `comments.xml`) and normalizes CRLF in the reply body; user-supplied author names no longer leak a raw CR into attribute values.
+- **`reject_all_changes`** restores a deleted hyperlink / smartTag and its text instead of dropping it; **`accept_all_changes`** fully resolves a nested `<w:ins><w:del>`; a tracked deletion of a whole table is honoured on accept (row-level markers, nested tables included).
+- **Inline wrappers (`<w:hyperlink>` / `<w:smartTag>`) are handled consistently:** `search_text`, `replace_texts`, `format_text`, tracked deletion, and accept / reject all reach text inside them (previously several paths skipped wrapper content).
 
 ## [3.1.0] — 2026-05-03
 
