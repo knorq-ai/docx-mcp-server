@@ -10,6 +10,7 @@ import {
   builder,
   findAll,
   findOne,
+  sanitizeXmlText,
 } from "./xml-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -23,6 +24,8 @@ export const ErrorCode = {
   NOT_A_PARAGRAPH: "NOT_A_PARAGRAPH",
   NOT_A_TABLE: "NOT_A_TABLE",
   ANCHOR_NOT_FOUND: "ANCHOR_NOT_FOUND",
+  AMBIGUOUS_ANCHOR: "AMBIGUOUS_ANCHOR",
+  INVALID_LOCATOR: "INVALID_LOCATOR",
   INVALID_PARAMETER: "INVALID_PARAMETER",
   UNTRACKED_EDIT_NOT_ALLOWED: "UNTRACKED_EDIT_NOT_ALLOWED",
   PENDING_REVISIONS: "PENDING_REVISIONS",
@@ -102,17 +105,6 @@ export function getBody(parsed: XNode[]): XNode[] {
   return bodyEl["w:body"];
 }
 
-/** Returns the indices into the body array for content blocks (paragraphs + tables) */
-export function blockBodyIndices(body: XNode[]): number[] {
-  const indices: number[] = [];
-  for (let i = 0; i < body.length; i++) {
-    if (body[i]["w:p"] || body[i]["w:tbl"]) {
-      indices.push(i);
-    }
-  }
-  return indices;
-}
-
 /**
  * Recursively iterate all paragraphs inside a table (including nested tables).
  * Calls `callback` with each paragraph's children array.
@@ -156,7 +148,10 @@ export function getHeaderFooterFiles(handle: DocxHandle): string[] {
 // ---------------------------------------------------------------------------
 
 export function escapeXml(text: string): string {
-  return text
+  // Strip XML-1.0-illegal control chars first (same chokepoint as textNode),
+  // then escape the markup-significant characters. Covers the string-building
+  // path (createDocument) just as textNode covers the builder path.
+  return sanitizeXmlText(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

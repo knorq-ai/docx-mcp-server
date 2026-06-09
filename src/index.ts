@@ -17,6 +17,9 @@ import {
   readDocument,
   getDocumentInfo,
   searchText,
+  readTableCell,
+  readTableStructure,
+  getParagraphFormat,
   replaceTexts,
   editParagraphs,
   insertParagraphs,
@@ -39,8 +42,12 @@ import {
   rejectAllChanges,
   readHeaderFooter,
   editTableCells,
+  editTableParagraphs,
+  deleteTableParagraphs,
+  insertTableParagraphs,
   readFootnotes,
   listImages,
+  ensureAnchors,
   EngineError,
   ErrorCode,
 } from "./docx-engine.js";
@@ -104,7 +111,7 @@ const server = new McpServer({
 
 server.tool(
   "read_document",
-  "Read the content of a DOCX file. Returns paragraphs with indices, styles, and formatting hints. Use start_paragraph/end_paragraph for large documents. Use show_revisions to see tracked changes annotations.",
+  "Read the content of a DOCX file. Returns paragraphs with indices, styles, and formatting hints. Use start_paragraph/end_paragraph for large documents. Use show_revisions to see tracked changes annotations. Use show_anchors to show each paragraph's stable anchor (@id) for index-independent editing.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     start_paragraph: z
@@ -122,14 +129,22 @@ server.tool(
       .describe(
         "Show tracked changes with annotations: [-deleted-] and [+inserted+]. Default false shows accepted text only.",
       ),
+    show_anchors: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Prefix each paragraph that has a stable anchor with `@<anchor>`. Anchors survive index shifts; run ensure_anchors first if paragraphs show none. Default false.",
+      ),
   },
-  async ({ file_path, start_paragraph, end_paragraph, show_revisions }) => {
+  async ({ file_path, start_paragraph, end_paragraph, show_revisions, show_anchors }) => {
     try {
       const result = await readDocument(
         file_path,
         start_paragraph,
         end_paragraph,
         show_revisions,
+        show_anchors,
       );
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -165,15 +180,38 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: ensure_anchors
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "ensure_anchors",
+  "Assign a stable anchor (Word's w14:paraId) to every top-level paragraph that lacks one, and return the full index→anchor map. Anchors survive the index shifts caused by insert/delete, so multi-step edits can target `anchor` instead of `paragraph_index` and stop re-reading after every mutation. Idempotent: a second call seeds nothing. Most Word-authored docs already carry anchors. v1 covers direct-body paragraphs only (table-cell / content-control paragraphs report no anchor).",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+  },
+  async ({ file_path }) => {
+    try {
+      const result = await ensureAnchors(file_path);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Tool: search_text
 // ---------------------------------------------------------------------------
 
 server.tool(
   "search_text",
-  "Search for text in a DOCX file. Returns matching blocks with context.",
+  "Search for text in a DOCX file. Returns matching blocks with context. Each match's <json> entry includes the paragraph's stable `anchor` when it has one (run ensure_anchors first to populate them), so you can edit by anchor instead of a soon-to-shift block index.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    query: z.string().describe("Text to search for"),
+    query: z.string().min(1).describe("Text to search for (non-empty)"),
     case_sensitive: z
       .boolean()
       .optional()
@@ -183,6 +221,84 @@ server.tool(
   async ({ file_path, query, case_sensitive }) => {
     try {
       const result = await searchText(file_path, query, case_sensitive);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: read_table_structure
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "read_table_structure",
+  "Inspect a table without reading the whole document. Returns the row/column dimensions and a short text preview of every cell, plus each cell's horizontal merge span (gridSpan) and vertical merge state (vMerge). Indices are physical w:tc positions — the same convention edit_table_cells / read_table_cell use.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    block_index: z
+      .number()
+      .describe("Block index of the table (from read_document / get_document_info)"),
+  },
+  async ({ file_path, block_index }) => {
+    try {
+      const result = await readTableStructure(file_path, block_index);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: read_table_cell
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "read_table_cell",
+  "Read a single table cell without reading the whole document. Returns the cell's paragraphs (text + style/alignment/numbering) and its merge info (gridSpan / vMerge). Pair with edit_table_cells to inspect before editing.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    block_index: z.number().describe("Block index of the table"),
+    row_index: z.number().describe("Zero-based row index"),
+    col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+  },
+  async ({ file_path, block_index, row_index, col_index }) => {
+    try {
+      const result = await readTableCell(file_path, block_index, row_index, col_index);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text", text: formatError(e) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: get_paragraph_format
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "get_paragraph_format",
+  "Introspect a paragraph's formatting: style, heading level, alignment, numbering (numId/level), indentation (twips) and spacing (points). Useful to discover which existing paragraph to pass to insert_paragraphs' copy_format_from, or to debug why two paragraphs render differently. Values are returned in the same units set_paragraph_formats accepts.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    paragraph_index: z
+      .number()
+      .describe("Block index of the paragraph (from read_document / get_document_info)"),
+  },
+  async ({ file_path, paragraph_index }) => {
+    try {
+      const result = await getParagraphFormat(file_path, paragraph_index);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return {
@@ -272,7 +388,7 @@ server.tool(
 
 server.tool(
   "edit_paragraphs",
-  "Replace the text content of multiple paragraphs in one operation. Opens and saves the file only once. Paragraph indices remain stable because edits don't change paragraph count.",
+  "Replace the text content of multiple paragraphs in one operation. Opens and saves the file only once. Each edit targets a paragraph by EITHER paragraph_index OR anchor (a stable id from ensure_anchors / search_text that survives index shifts); editing also assigns an anchor to each touched paragraph. A '\\n' in new_text is a paragraph break: untracked edits split the line into separate paragraphs (each inheriting the original numbering / indentation), which increases the block count and shifts later indices; tracked edits keep one paragraph and render '\\n' as a soft line break.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     edits: z
@@ -280,8 +396,17 @@ server.tool(
         z.object({
           paragraph_index: z
             .number()
-            .describe("Index of the paragraph to edit"),
-          new_text: z.string().describe("New text content for the paragraph"),
+            .optional()
+            .describe("Index of the paragraph to edit (use this OR anchor)"),
+          anchor: z
+            .string()
+            .optional()
+            .describe("Stable anchor of the paragraph to edit (use this OR paragraph_index)"),
+          new_text: z
+            .string()
+            .describe(
+              "New text content for the paragraph. '\\n' is treated as a paragraph break (see tool description).",
+            ),
         }),
       )
       .describe("Array of paragraph edits"),
@@ -310,6 +435,7 @@ server.tool(
       assertTrackChanges(track_changes, allow_untracked_edit);
       const engineEdits = edits.map((e) => ({
         paragraphIndex: e.paragraph_index,
+        anchor: e.anchor,
         newText: e.new_text,
       }));
       const result = await editParagraphs(
@@ -334,16 +460,29 @@ server.tool(
 
 server.tool(
   "insert_paragraphs",
-  "Insert multiple paragraphs in one operation. Handles index shifting internally by processing in reverse order. Opens and saves the file only once. Supports numbering (num_id/num_level) and format copying (copy_format_from).",
+  "Insert multiple paragraphs in one operation. Opens and saves the file only once. Supports numbering (num_id/num_level) and format copying (copy_format_from / copy_format_from_anchor). Each paragraph is placed by EITHER position (block index) OR anchor + placement (\"before\"/\"after\" a stable paragraph that survives index shifts). A '\\n' in text is a paragraph break: untracked inserts create one paragraph per line; tracked inserts keep one paragraph and render '\\n' as a soft line break. When several share the same position, document order is the reverse of array order — list them back-to-front or use separate calls; anchor placement preserves array order. The result's <json> reports each new paragraph's anchor.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     paragraphs: z
       .array(
         z.object({
-          text: z.string().describe("Text content of the new paragraph"),
+          text: z
+            .string()
+            .describe(
+              "Text content of the new paragraph. '\\n' is treated as a paragraph break (see tool description).",
+            ),
           position: z
             .number()
-            .describe("Block index to insert before (-1 for end of document)"),
+            .optional()
+            .describe("Block index to insert before (-1 for end of document). Use this OR anchor."),
+          anchor: z
+            .string()
+            .optional()
+            .describe("Stable anchor of an existing paragraph to insert relative to (use with placement). Use this OR position."),
+          placement: z
+            .enum(["before", "after"])
+            .optional()
+            .describe("Where to insert relative to anchor. Required when anchor is set."),
           style: z
             .string()
             .optional()
@@ -351,7 +490,7 @@ server.tool(
           num_id: z
             .number()
             .optional()
-            .describe("Numbering definition ID (w:numId). Ignored if copy_format_from is set."),
+            .describe("Numbering definition ID (w:numId). Ignored if copy_format_from(_anchor) is set."),
           num_level: z
             .number()
             .optional()
@@ -361,6 +500,10 @@ server.tool(
             .number()
             .optional()
             .describe("Block index of an existing paragraph whose w:pPr to deep-copy. When set, style/num_id/num_level are ignored."),
+          copy_format_from_anchor: z
+            .string()
+            .optional()
+            .describe("Like copy_format_from but identifies the source paragraph by anchor."),
         }),
       )
       .describe("Array of paragraphs to insert"),
@@ -390,10 +533,13 @@ server.tool(
         paragraphs.map(p => ({
           text: p.text,
           position: p.position,
+          anchor: p.anchor,
+          placement: p.placement,
           style: p.style,
           numId: p.num_id,
           numLevel: p.num_level,
           copyFormatFrom: p.copy_format_from,
+          copyFormatFromAnchor: p.copy_format_from_anchor,
         })),
         track_changes,
         author,
@@ -414,12 +560,19 @@ server.tool(
 
 server.tool(
   "delete_paragraphs",
-  "Delete multiple paragraphs or table blocks by their indices in one operation. Handles index reordering internally.",
+  "Delete multiple paragraphs or table blocks in one operation. Target blocks by paragraph_indices (a block index can be a paragraph OR a table) and/or by anchors (stable paragraph ids from ensure_anchors / search_text; an anchor can only target a paragraph, since tables have no anchor). At least one of the two must be supplied.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     paragraph_indices: z
       .array(z.number())
-      .describe("Array of block indices to delete"),
+      .optional()
+      .default([])
+      .describe("Block indices to delete (a paragraph or a table block each)"),
+    anchors: z
+      .array(z.string())
+      .optional()
+      .default([])
+      .describe("Stable anchors of paragraphs to delete (index-shift-proof)"),
     track_changes: z
       .boolean()
       .optional()
@@ -440,7 +593,7 @@ server.tool(
         "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
       ),
   },
-  async ({ file_path, paragraph_indices, track_changes, author, allow_untracked_edit }) => {
+  async ({ file_path, paragraph_indices, anchors, track_changes, author, allow_untracked_edit }) => {
     try {
       assertTrackChanges(track_changes, allow_untracked_edit);
       const result = await deleteParagraphs(
@@ -448,6 +601,7 @@ server.tool(
         paragraph_indices,
         track_changes,
         author,
+        anchors,
       );
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -468,7 +622,7 @@ server.tool(
   "Apply character formatting (bold, italic, underline, highlight, font, size, color) to all runs matching the search text.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    search: z.string().describe("Text to find and format"),
+    search: z.string().min(1).describe("Text to find and format (non-empty)"),
     bold: z.boolean().optional().describe("Set bold (true/false)"),
     italic: z.boolean().optional().describe("Set italic (true/false)"),
     underline: z.boolean().optional().describe("Set underline (true/false)"),
@@ -481,7 +635,12 @@ server.tool(
       .optional()
       .describe("Highlight color: yellow, green, cyan, magenta, blue, red, etc."),
     font_name: z.string().optional().describe("Font family name"),
-    font_size: z.number().optional().describe("Font size in points (e.g. 12)"),
+    font_size: z
+      .number()
+      .min(0)
+      .max(1638)
+      .optional()
+      .describe("Font size in points (e.g. 12; 0–1638, Word's max; 0 leaves size unset)"),
     font_color: z
       .string()
       .optional()
@@ -537,7 +696,7 @@ server.tool(
 
 server.tool(
   "set_paragraph_formats",
-  "Apply alignment, spacing, and indentation to one or more paragraphs in a single open/save cycle. Each group bundles a list of paragraph indices with the formatting to apply to them.",
+  "Apply alignment, spacing, and indentation to one or more paragraphs in a single open/save cycle. Each group bundles a set of target paragraphs (by indices and/or stable anchors) with the formatting to apply. A group must list at least one index or anchor.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     groups: z
@@ -545,7 +704,14 @@ server.tool(
         z.object({
           indices: z
             .array(z.number())
+            .optional()
+            .default([])
             .describe("Paragraph indices to apply this format to"),
+          anchors: z
+            .array(z.string())
+            .optional()
+            .default([])
+            .describe("Stable paragraph anchors to apply this format to (index-shift-proof)"),
           alignment: z
             .enum(["left", "center", "right", "justify"])
             .optional()
@@ -586,6 +752,7 @@ server.tool(
     try {
       const engineGroups = groups.map((g) => ({
         indices: g.indices,
+        anchors: g.anchors,
         format: {
           alignment: g.alignment,
           spaceBefore: g.space_before,
@@ -837,7 +1004,7 @@ server.tool(
   "Highlight all occurrences of text with a specified color.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    search: z.string().describe("Text to highlight"),
+    search: z.string().min(1).describe("Text to highlight (non-empty)"),
     color: z
       .string()
       .optional()
@@ -879,12 +1046,29 @@ server.tool(
     position: z
       .number()
       .describe("Block index to insert before (-1 for end)"),
-    rows: z.number().describe("Number of rows"),
-    cols: z.number().describe("Number of columns"),
+    rows: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .describe("Number of rows (1–1000; rows×cols must be ≤ 20000)"),
+    cols: z
+      .number()
+      .int()
+      .min(1)
+      .max(63)
+      .describe("Number of columns (1–63, Word's column limit; rows×cols must be ≤ 20000)"),
     data: z
-      .array(z.array(z.string()))
+      // Bound the payload at the MCP boundary too (the engine also clamps to
+      // rows×cols): cap the outer array to the row limit (1000) and each inner
+      // row to the column limit (63) so an enormous `data` is rejected here
+      // rather than allocated and walked. Mirrors MAX_TABLE_ROWS / MAX_TABLE_COLS.
+      .array(z.array(z.string()).max(63))
+      .max(1000)
       .optional()
-      .describe("Optional 2D array of cell values, e.g. [['A1','B1'],['A2','B2']]"),
+      .describe(
+        "Optional 2D array of cell values, e.g. [['A1','B1'],['A2','B2']]. The table is always rows×cols: values beyond rows×cols are ignored (extra rows/columns dropped), and short rows are blank-padded. Bounded to ≤1000 rows × ≤63 columns at the schema (matching the table dimension caps).",
+      ),
   },
   async ({ file_path, position, rows, cols, data }) => {
     try {
@@ -905,7 +1089,7 @@ server.tool(
 
 server.tool(
   "set_headings",
-  "Convert multiple paragraphs to headings in one operation. Opens and saves the file only once.",
+  "Convert multiple paragraphs to headings in one operation. Opens and saves the file only once. Each item targets a paragraph by EITHER paragraph_index OR anchor (a stable, index-shift-proof id).",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     headings: z
@@ -913,8 +1097,13 @@ server.tool(
         z.object({
           paragraph_index: z
             .number()
-            .describe("Index of the paragraph to convert"),
-          level: z.number().min(1).max(9).describe("Heading level (1–9)"),
+            .optional()
+            .describe("Index of the paragraph to convert (use this OR anchor)"),
+          anchor: z
+            .string()
+            .optional()
+            .describe("Stable anchor of the paragraph to convert (use this OR paragraph_index)"),
+          level: z.number().int().min(1).max(9).describe("Heading level (integer 1–9)"),
         }),
       )
       .describe("Array of heading assignments"),
@@ -923,6 +1112,7 @@ server.tool(
     try {
       const engineItems = headings.map((h) => ({
         paragraphIndex: h.paragraph_index,
+        anchor: h.anchor,
         level: h.level,
       }));
       const result = await setHeadings(file_path, engineItems);
@@ -1026,25 +1216,29 @@ server.tool(
       .describe("Page orientation"),
     width_mm: z
       .number()
+      .positive()
+      .max(558.8)
       .optional()
-      .describe("Custom page width in millimeters (overrides preset)"),
+      .describe("Custom page width in millimeters (overrides preset; 0–558.8, OOXML page limit)"),
     height_mm: z
       .number()
+      .positive()
+      .max(558.8)
       .optional()
-      .describe("Custom page height in millimeters (overrides preset)"),
+      .describe("Custom page height in millimeters (overrides preset; 0–558.8, OOXML page limit)"),
     margin_preset: z
       .string()
       .optional()
       .describe(
         "Margin preset: NORMAL, NARROW, WIDE, JP_COURT_25, JP_COURT_30_20",
       ),
-    top_mm: z.number().optional().describe("Top margin in mm"),
-    right_mm: z.number().optional().describe("Right margin in mm"),
-    bottom_mm: z.number().optional().describe("Bottom margin in mm"),
-    left_mm: z.number().optional().describe("Left margin in mm"),
-    header_mm: z.number().optional().describe("Header distance in mm"),
-    footer_mm: z.number().optional().describe("Footer distance in mm"),
-    gutter_mm: z.number().optional().describe("Gutter margin in mm"),
+    top_mm: z.number().min(0).max(558.8).optional().describe("Top margin in mm (0–558.8)"),
+    right_mm: z.number().min(0).max(558.8).optional().describe("Right margin in mm (0–558.8)"),
+    bottom_mm: z.number().min(0).max(558.8).optional().describe("Bottom margin in mm (0–558.8)"),
+    left_mm: z.number().min(0).max(558.8).optional().describe("Left margin in mm (0–558.8)"),
+    header_mm: z.number().min(0).max(558.8).optional().describe("Header distance in mm (0–558.8)"),
+    footer_mm: z.number().min(0).max(558.8).optional().describe("Footer distance in mm (0–558.8)"),
+    gutter_mm: z.number().min(0).max(558.8).optional().describe("Gutter margin in mm (0–558.8)"),
   },
   async ({
     file_path,
@@ -1115,7 +1309,7 @@ server.tool(
 
 server.tool(
   "edit_table_cells",
-  "Replace the text content of multiple table cells in one operation. Cells can span different tables. Opens and saves the file only once.",
+  "Replace the text content of multiple table cells in one operation. Cells can span different tables. Opens and saves the file only once. A '\\n' in new_text is a paragraph break. Untracked edits replace the WHOLE cell, turning each line into its own paragraph (inheriting the cell's first-paragraph formatting), so re-editing leaves no stale lines. Tracked edits diff-replace the cell's first paragraph and render '\\n' as a soft line break.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
     edits: z
@@ -1126,7 +1320,11 @@ server.tool(
             .describe("Index of the table block"),
           row_index: z.number().describe("Zero-based row index"),
           col_index: z.number().describe("Zero-based column index"),
-          new_text: z.string().describe("New text content for the cell"),
+          new_text: z
+            .string()
+            .describe(
+              "New text content for the cell. '\\n' is treated as a paragraph break (see tool description).",
+            ),
         }),
       )
       .describe("Array of cell edits"),
@@ -1169,6 +1367,170 @@ server.tool(
         content: [{ type: "text", text: formatError(e) }],
         isError: true,
       };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: edit_table_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+const tableUntrackedFlag = z
+  .boolean()
+  .optional()
+  .default(false)
+  .describe(
+    "Capability flag required to disable tracked changes. When track_changes is false, this must also be true or the call fails with UNTRACKED_EDIT_NOT_ALLOWED. Default false. This is a safety guard against prompt injection or long-context drift in regulated-industry use — silent edits to legal/regulated documents must be opted into with two independent flags.",
+  );
+
+server.tool(
+  "edit_table_paragraphs",
+  "Edit one specific paragraph inside a table cell (addressed by a cell-local paragraph_index), without replacing the whole cell. Use this to surgically change a single line of a multi-paragraph cell (e.g. one item of a numbered list) while leaving the others untouched. paragraph_index counts only the cell's paragraphs (0-based); see read_table_cell. row/col are physical w:tc positions. A '\\n' in new_text renders as a soft line break (<w:br/>) within the same paragraph for BOTH tracked and untracked edits — it does NOT split the cell into extra paragraphs (which would change the cell's paragraph_index numbering); use edit_table_cells if you want untracked '\\n' to create separate cell paragraphs.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    edits: z
+      .array(
+        z.object({
+          block_index: z.number().describe("Index of the table block"),
+          row_index: z.number().describe("Zero-based row index"),
+          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+          paragraph_index: z.number().describe("Zero-based paragraph index within the cell"),
+          new_text: z.string().describe("New text content for that paragraph. '\\n' renders as a soft line break (<w:br/>) within the same paragraph — see tool description."),
+        }),
+      )
+      .describe("Array of table-paragraph edits"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record edits as tracked changes. Default true."),
+    author: z.string().optional().default("Claude").describe("Author name for tracked changes"),
+    allow_untracked_edit: tableUntrackedFlag,
+  },
+  async ({ file_path, edits, track_changes, author, allow_untracked_edit }) => {
+    try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
+      const engineEdits = edits.map((e) => ({
+        blockIndex: e.block_index,
+        rowIndex: e.row_index,
+        colIndex: e.col_index,
+        paragraphIndex: e.paragraph_index,
+        newText: e.new_text,
+      }));
+      const result = await editTableParagraphs(file_path, engineEdits, track_changes, author);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: delete_table_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "delete_table_paragraphs",
+  "Delete one specific paragraph inside a table cell (addressed by a cell-local paragraph_index). Use this to remove a single item from a multi-paragraph cell (e.g. one item of a numbered list) and let Word renumber the rest. If the deleted paragraph is the cell's last one, a blank paragraph is kept so the cell stays valid. paragraph_index counts only the cell's paragraphs (0-based); row/col are physical w:tc positions.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    targets: z
+      .array(
+        z.object({
+          block_index: z.number().describe("Index of the table block"),
+          row_index: z.number().describe("Zero-based row index"),
+          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+          paragraph_index: z.number().describe("Zero-based paragraph index within the cell"),
+        }),
+      )
+      .describe("Array of table paragraphs to delete"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record deletions as tracked changes. Default true."),
+    author: z.string().optional().default("Claude").describe("Author name for tracked changes"),
+    allow_untracked_edit: tableUntrackedFlag,
+  },
+  async ({ file_path, targets, track_changes, author, allow_untracked_edit }) => {
+    try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
+      const engineTargets = targets.map((t) => ({
+        blockIndex: t.block_index,
+        rowIndex: t.row_index,
+        colIndex: t.col_index,
+        paragraphIndex: t.paragraph_index,
+      }));
+      const result = await deleteTableParagraphs(file_path, engineTargets, track_changes, author);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: insert_table_paragraphs (bulk)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "insert_table_paragraphs",
+  "Insert a new paragraph inside a table cell at a cell-local position (insert before the paragraph currently at that index; an out-of-range position or -1 appends to the cell). Supports numbering (num_id/num_level) and format copying (copy_format_from, which references a paragraph index WITHIN the same cell). Multiple inserts into the same cell keep array order. row/col are physical w:tc positions.",
+  {
+    file_path: z.string().describe("Absolute path to the .docx file"),
+    inserts: z
+      .array(
+        z.object({
+          block_index: z.number().describe("Index of the table block"),
+          row_index: z.number().describe("Zero-based row index"),
+          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+          position: z
+            .number()
+            .describe("Cell-local paragraph index to insert before (-1 or out-of-range appends to the cell)"),
+          text: z.string().describe("Text content of the new paragraph"),
+          style: z.string().optional().describe("Paragraph style (e.g., 'Normal')"),
+          num_id: z
+            .number()
+            .optional()
+            .describe("Numbering definition ID (w:numId). Ignored if copy_format_from is set."),
+          num_level: z
+            .number()
+            .optional()
+            .default(0)
+            .describe("Numbering indentation level (w:ilvl), 0-based. Default 0."),
+          copy_format_from: z
+            .number()
+            .optional()
+            .describe("Paragraph index WITHIN THE SAME CELL whose w:pPr to deep-copy. Overrides style/num_id/num_level."),
+        }),
+      )
+      .describe("Array of table paragraphs to insert"),
+    track_changes: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Record insertions as tracked changes. Default true."),
+    author: z.string().optional().default("Claude").describe("Author name for tracked changes"),
+    allow_untracked_edit: tableUntrackedFlag,
+  },
+  async ({ file_path, inserts, track_changes, author, allow_untracked_edit }) => {
+    try {
+      assertTrackChanges(track_changes, allow_untracked_edit);
+      const engineInserts = inserts.map((i) => ({
+        blockIndex: i.block_index,
+        rowIndex: i.row_index,
+        colIndex: i.col_index,
+        position: i.position,
+        text: i.text,
+        style: i.style,
+        numId: i.num_id,
+        numLevel: i.num_level,
+        copyFormatFrom: i.copy_format_from,
+      }));
+      const result = await insertTableParagraphs(file_path, engineInserts, track_changes, author);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
     }
   },
 );

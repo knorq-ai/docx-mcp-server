@@ -180,6 +180,44 @@ export function formatInParagraph(
   fmt: TextFormatting,
   caseSensitive: boolean,
 ): number {
+  // An empty needle would push into `matches` every iteration without advancing
+  // `pos`, growing the array until it exceeds the JS max length and throws
+  // `RangeError: Invalid array length`. Bail fast (MCP layer also guards).
+  if (search.length === 0) return 0;
+
+  let count = formatInChildren(pChildren, search, fmt, caseSensitive);
+
+  // Recurse into each nested splice scope — w:sdt content and the transparent
+  // inline wrappers (w:hyperlink / w:smartTag). collectRunsWithIndices uses pIdx
+  // splices that address THIS children array, so each wrapper / sdtContent is an
+  // independent scope: process it on its own array while keeping the wrapper
+  // element itself. Recurse through wrappers (smartTag-in-hyperlink) and sdts.
+  for (const child of pChildren) {
+    if (child["w:sdt"]) {
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+      if (sdtContent) {
+        count += formatInParagraph(
+          sdtContent["w:sdtContent"] as XNode[], search, fmt, caseSensitive,
+        );
+      }
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      count += formatInParagraph(child[wtag] as XNode[], search, fmt, caseSensitive);
+    }
+  }
+
+  return count;
+}
+
+/** Core formatting on a flat children array (no sdt/wrapper traversal). */
+function formatInChildren(
+  pChildren: XNode[],
+  search: string,
+  fmt: TextFormatting,
+  caseSensitive: boolean,
+): number {
+  if (search.length === 0) return 0;
+
   const runs = collectRunsWithIndices(pChildren);
   if (runs.length === 0) return 0;
 

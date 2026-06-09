@@ -11,12 +11,34 @@ export type XNode = any;
 // Parser / Builder instances (shared, stateless)
 // ---------------------------------------------------------------------------
 
-/** Decode numeric character references (&#NNN; and &#xHHH;) that processEntities doesn't handle. */
+/**
+ * A Unicode scalar value that `String.fromCodePoint` accepts AND that is a legal
+ * XML character: in 0x0–0x10FFFF and not a UTF-16 surrogate (0xD800–0xDFFF).
+ * A reference outside this range (e.g. `&#x110000;` or a 14-digit decimal) would
+ * make `String.fromCodePoint` throw `RangeError: Invalid code point`; we instead
+ * leave such a (malformed) reference as literal text so the document still parses.
+ */
+function isDecodableCodePoint(cp: number): boolean {
+  return Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff);
+}
+
+/**
+ * Decode numeric character references (&#NNN; and &#xHHH;) that processEntities
+ * doesn't handle. Lenient: a reference whose code point is out of the valid XML
+ * range is left UNCHANGED (returned as the original matched text) rather than
+ * crashing the read with a RangeError — document.xml is untrusted input.
+ */
 function decodeNumericRefs(_name: string, val: unknown): unknown {
   if (typeof val !== "string") return val;
   return val
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCodePoint(parseInt(dec, 10)));
+    .replace(/&#x([0-9a-fA-F]+);/g, (match, hex: string) => {
+      const cp = parseInt(hex, 16);
+      return isDecodableCodePoint(cp) ? String.fromCodePoint(cp) : match;
+    })
+    .replace(/&#(\d+);/g, (match, dec: string) => {
+      const cp = parseInt(dec, 10);
+      return isDecodableCodePoint(cp) ? String.fromCodePoint(cp) : match;
+    });
 }
 
 const parserOpts = {
@@ -71,7 +93,11 @@ export function attr(el: XNode, name: string): string | undefined {
 
 export function setAttr(el: XNode, name: string, value: string): void {
   if (!el[":@"]) el[":@"] = {};
-  el[":@"]["@_" + name] = value;
+  // Sanitize XML-illegal control chars / lone surrogates in user-controlled
+  // attribute values (e.g. w:author, w:pStyle/@w:val, font names, colors). The
+  // builder's processEntities still escapes markup chars (&,<,>,") on output, so
+  // we only STRIP illegal chars here — never escape (that would double-encode).
+  el[":@"]["@_" + name] = typeof value === "string" ? sanitizeXmlAttr(value) : value;
 }
 
 export function findAll(nodes: XNode[], tag: string): XNode[] {
@@ -92,15 +118,99 @@ export function el(
   if (attrs) {
     node[":@"] = {};
     for (const [k, v] of Object.entries(attrs)) {
-      node[":@"]["@_" + k] = v;
+      // Same sanitization chokepoint as setAttr: strip XML-illegal chars from
+      // string attribute values (do NOT escape — the builder does that).
+      node[":@"]["@_" + k] = typeof v === "string" ? sanitizeXmlAttr(v) : v;
     }
   }
   return node;
 }
 
-/** Create a text node */
+/**
+ * XML-1.0 forbids these characters in character data: the C0 controls
+ * U+0000–U+0008, U+000B (vertical tab), U+000C (form feed), U+000E–U+001F (incl.
+ * U+001B ESC), and the noncharacters U+FFFE / U+FFFF. Only \t (U+0009), \n
+ * (U+000A) and \r (U+000D) are legal whitespace and are preserved. Such chars
+ * routinely arrive in text pasted from PDFs/terminals; writing them verbatim
+ * produces a document.xml that Word and python-docx reject. We strip them
+ * (Word's own behavior) so no run-text path can corrupt the file.
+ */
+// eslint-disable-next-line no-control-regex
+const ILLEGAL_XML_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g;
+
+/**
+ * Drop UNPAIRED UTF-16 surrogates (also XML-1.0-illegal): a high surrogate
+ * U+D800–DBFF not immediately followed by a low U+DC00–DFFF, or a low surrogate
+ * not immediately preceded by a high one. VALID surrogate pairs (astral chars
+ * such as emoji) are kept intact — the pair is consumed together and re-emitted.
+ */
+function stripLoneSurrogates(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      // High surrogate: keep only if the next unit is a low surrogate (valid pair).
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += text[i] + text[i + 1];
+        i++; // consume the low surrogate too
+      }
+      // else: lone high surrogate → drop.
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      // Lone low surrogate (a valid pair would have been consumed above) → drop.
+    } else {
+      out += text[i];
+    }
+  }
+  return out;
+}
+
+/**
+ * Remove XML-1.0-illegal characters from run text: C0 controls (keeps \t \n \r),
+ * the noncharacters U+FFFE/U+FFFF, and unpaired surrogates. Valid surrogate
+ * pairs (emoji / astral chars) survive.
+ */
+export function sanitizeXmlText(text: string): string {
+  return stripLoneSurrogates(text.replace(ILLEGAL_XML_CHARS, ""));
+}
+
+/**
+ * Sanitize a value destined for an XML ATTRIBUTE (not a text node). Beyond the
+ * illegal-char stripping of `sanitizeXmlText`, this collapses any run of
+ * XML-legal whitespace (`\r`, `\n`, `\t`) to a single space (N7).
+ *
+ * Why: `\r`/`\n`/`\t` are legal in attribute values, so `sanitizeXmlText` keeps
+ * them — but XML-1.0 §3.3.3 attribute-value normalization makes a conformant
+ * reader (Word / python-docx / lxml) replace each with a space on the way in.
+ * A reviewer name like "Eve\r\nMallory" stored raw in `w:author` would round-trip
+ * to "Eve  Mallory" (or worse, drift across tools). Collapsing here makes the
+ * recorded value stable and identical to what every reader will observe. This is
+ * applied ONLY at the attribute chokepoints (`setAttr`/`el`); the TEXT-node path
+ * (`textNode`) is untouched, so newlines inside run text are preserved/handled by
+ * the edit pipeline as before.
+ */
+export function sanitizeXmlAttr(value: string): string {
+  return sanitizeXmlText(value).replace(/[\r\n\t]+/g, " ");
+}
+
+/**
+ * Normalize line endings to a lone "\n": collapse CRLF ("\r\n") and a bare
+ * carriage return ("\r") to "\n". Applied at the start of every edit/insert
+ * text pipeline BEFORE splitting on "\n" or building soft-break runs. Without
+ * it, a stray "\r" survives inside a <w:t>; a conformant reader (Word /
+ * python-docx, per XML 1.0 §2.11 line-end normalization) then turns it into a
+ * literal newline character in the run — rendered as whitespace, not the
+ * intended line/paragraph break. "\r" is XML-legal (sanitizeXmlText keeps it),
+ * so this normalization is specific to the edit-text pipeline and does not
+ * touch verbatim document content elsewhere.
+ */
+export function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
+/** Create a text node (illegal XML control chars are stripped here). */
 export function textNode(text: string): XNode {
-  return { "#text": text };
+  return { "#text": sanitizeXmlText(text) };
 }
 
 export function cloneNode(node: XNode): XNode {

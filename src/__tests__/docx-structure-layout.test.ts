@@ -29,6 +29,7 @@ import {
   insertParagraphs,
   deleteParagraphs,
   getDocumentInfo,
+  getDocumentInfoStructured,
 } from "../docx-engine.js";
 
 afterEach(cleanupTmpFiles);
@@ -469,11 +470,29 @@ describe("rejectAllChanges", () => {
 
   it("rejects tracked paragraph insert (removes it)", async () => {
     const p = await createTmpDoc("Existing only");
+    const beforeBlocks = (await getDocumentInfoStructured(p)).totalBlocks;
     await insertParagraphs(p, [{ text: "Should disappear", position: -1 }], true);
     await rejectAllChanges(p);
     const doc = await readDocument(p);
     expect(doc).toContain("Existing only");
     expect(doc).not.toContain("Should disappear");
+    // H3: the block count returns to the pre-insert value — no residual empty <w:p>.
+    expect((await getDocumentInfoStructured(p)).totalBlocks).toBe(beforeBlocks);
+  });
+
+  it("rejects a mid-document tracked paragraph insert (no residual empty <w:p>)", async () => {
+    // The residue is visible in the middle: without the fix, reject would leave
+    // an empty paragraph between First and Second, inflating the block count.
+    const p = await createTmpDoc("First\nSecond");
+    const beforeBlocks = (await getDocumentInfoStructured(p)).totalBlocks;
+    expect(beforeBlocks).toBe(2);
+    await insertParagraphs(p, [{ text: "Inserted middle", position: 1 }], true);
+    await rejectAllChanges(p);
+    const doc = await readDocument(p);
+    expect(doc).toContain("First");
+    expect(doc).toContain("Second");
+    expect(doc).not.toContain("Inserted middle");
+    expect((await getDocumentInfoStructured(p)).totalBlocks).toBe(beforeBlocks);
   });
 
   it("rejects tracked paragraph deletion (restores deleted text)", async () => {

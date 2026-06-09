@@ -297,7 +297,17 @@ export function insertCommentRangeMarkers(
     el("w:commentReference", [], { "w:id": String(commentId) }),
   ]);
 
-  // Try to find a run containing the anchor text and wrap it
+  const anchorMatches = (text: string): boolean =>
+    text.includes(anchorText) ||
+    normalizeForMatching(text).includes(normalizeForMatching(anchorText));
+
+  // Try to find a run — or a transparent inline wrapper (w:hyperlink /
+  // w:smartTag) — whose text contains the anchor, and bracket it precisely.
+  // For a wrapper we wrap the WHOLE wrapper element (the smallest precise unit
+  // we can address without splicing the link's internals): commentRangeStart
+  // goes before it, commentRangeEnd + the reference run go after it. This keeps
+  // the surrounding runs outside the comment range instead of degrading to a
+  // whole-paragraph wrap.
   let inserted = false;
   for (let i = 0; i < pChildren.length; i++) {
     const child = pChildren[i];
@@ -311,10 +321,16 @@ export function insertCommentRangeMarkers(
         }
       }
       // Try exact match on individual run, then fuzzy
-      if (
-        runText.includes(anchorText) ||
-        normalizeForMatching(runText).includes(normalizeForMatching(anchorText))
-      ) {
+      if (anchorMatches(runText)) {
+        pChildren.splice(i, 0, rangeStart);
+        pChildren.splice(i + 2, 0, rangeEnd, refRun);
+        inserted = true;
+        break;
+      }
+    } else if (child["w:hyperlink"] || child["w:smartTag"]) {
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      const wrapperText = extractParagraphText(child[wtag] as XNode[], false);
+      if (anchorMatches(wrapperText)) {
         pChildren.splice(i, 0, rangeStart);
         pChildren.splice(i + 2, 0, rangeEnd, refRun);
         inserted = true;

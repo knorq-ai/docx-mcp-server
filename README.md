@@ -4,13 +4,13 @@
 
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Word (.docx) documents. Works with Claude Code, Cursor, and any MCP-compatible client.
 
-**33 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
+**34 tools** for document content, formatting, comments, page layout, and track changes — all running locally via stdio with no file uploads.
 
 ## Features
 
 | Category | Tools |
 |---|---|
-| **Read** | `read_document`, `get_document_info`, `search_text`, `list_images` |
+| **Read** | `read_document`, `get_document_info`, `search_text`, `list_images`, `get_paragraph_format`, `ensure_anchors` |
 | **Edit** | `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs` |
 | **Format** | `format_text`, `set_paragraph_formats`, `highlight_text`, `set_headings` |
 | **Structure** | `insert_table`, `create_document`, `apply_document_preset` |
@@ -18,7 +18,7 @@ A local [MCP](https://modelcontextprotocol.io/) server for reading and editing W
 | **Track changes** | `accept_all_changes`, `reject_all_changes` |
 | **Page layout** | `get_page_layout`, `set_page_layout` |
 | **Headers/footers** | `read_header_footer` |
-| **Tables** | `edit_table_cells` |
+| **Tables** | `read_table_structure`, `read_table_cell`, `edit_table_cells`, `edit_table_paragraphs`, `delete_table_paragraphs`, `insert_table_paragraphs` |
 | **Footnotes** | `read_footnotes` |
 
 ### Track changes
@@ -30,6 +30,18 @@ Track changes is **on by default**. Pass `track_changes: false` to make direct e
 Use `read_document` with `show_revisions: true` to see tracked changes annotated as `[-deleted-]` and `[+inserted+]`. The default view shows accepted text only.
 
 Use `accept_all_changes` / `reject_all_changes` to finalize or revert all pending revisions.
+
+### Stable anchors
+
+Paragraphs are normally addressed by integer block index, but every insert/delete shifts the indices of later blocks — so a multi-step edit has to re-read after each change. **Anchors** fix this: an anchor is a stable id (Word's `w14:paraId`) that stays attached to its paragraph across index shifts.
+
+- Run **`ensure_anchors`** once to assign anchors to every paragraph and get the full index→anchor map (most Word-authored documents already carry anchors; the call is idempotent).
+- `search_text` returns each match's `anchor`, and `read_document` with `show_anchors: true` prints them inline.
+- The edit tools (`edit_paragraphs`, `delete_paragraphs`, `set_paragraph_formats`, `set_headings`, `insert_paragraphs`) accept an `anchor` (or `anchors`) as an alternative to `paragraph_index`. Editing also auto-assigns an anchor to each touched/inserted paragraph and `insert_paragraphs` returns the new anchors, so a pipeline can keep editing without re-reading.
+
+v1 anchors cover top-level (direct-body) paragraphs; paragraphs inside tables or content controls are not anchored.
+
+For a document containing a top-level content control (`w:sdt`), block indices are unified across read/search/edit so every tool agrees on the same numbering, and inserting or deleting a paragraph whose index falls inside an SDT is refused (edit it in place by index instead) — see the CHANGELOG entry "Unified block-index space".
 
 ### Page layout
 
@@ -188,9 +200,19 @@ file_path, query, case_sensitive?
 file_path
 ```
 
+**`get_paragraph_format`** — Introspect a paragraph's formatting (style, heading level, alignment, numbering, indentation in twips, spacing in points). Use it to find a `copy_format_from` source or debug why two paragraphs render differently. Values match the units `set_paragraph_formats` accepts.
+```
+file_path, paragraph_index
+```
+
+**`ensure_anchors`** — Assign a stable anchor (`w14:paraId`) to every top-level paragraph that lacks one and return the index→anchor map. Idempotent. See [Stable anchors](#stable-anchors).
+```
+file_path
+```
+
 ### Editing
 
-All editing tools accept `track_changes` (default `true`) and `author` (default `"Claude"`).
+All editing tools accept `track_changes` (default `true`) and `author` (default `"Claude"`). The paragraph tools below accept an `anchor` (or `anchors`) in place of `paragraph_index` for index-shift-proof targeting — see [Stable anchors](#stable-anchors).
 
 **`replace_texts`** — Apply one or more find/replace operations in a single open/save cycle. Handles text spanning multiple runs.
 - Under `track_changes: false`, items are applied sequentially: a later item can match text produced by an earlier item.
@@ -199,19 +221,19 @@ All editing tools accept `track_changes` (default `true`) and `author` (default 
 file_path, items (array of {search, replace, case_sensitive?}), track_changes?, author?, include_headers_footers?
 ```
 
-**`edit_paragraphs`** — Replace the text content of one or more paragraphs in a single open/save cycle.
+**`edit_paragraphs`** — Replace the text content of one or more paragraphs in a single open/save cycle. Target each by `paragraph_index` or `anchor`. A `\n` in `new_text` is a paragraph break: untracked edits split it into separate paragraphs (each inheriting the original numbering/indentation), tracked edits keep one paragraph and render `\n` as a soft line break.
 ```
-file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
-```
-
-**`insert_paragraphs`** — Insert one or more paragraphs in one operation. Handles index shifting internally.
-```
-file_path, paragraphs (array of {text, position, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
+file_path, edits (array of {paragraph_index? | anchor?, new_text}), track_changes?, author?
 ```
 
-**`delete_paragraphs`** — Delete one or more paragraphs in one operation. Handles index reordering internally.
+**`insert_paragraphs`** — Insert one or more paragraphs in one operation. Place each by `position` (block index) or `anchor` + `placement` ("before"/"after"); returns the new paragraphs' anchors. A `\n` in `text` is a paragraph break (untracked: one paragraph per line; tracked: soft line break). When several paragraphs share the same `position`, they land in the document in the reverse of array order — list them back-to-front or use separate calls (anchor placement preserves array order).
 ```
-file_path, paragraph_indices, track_changes?, author?
+file_path, paragraphs (array of {text, position? | (anchor + placement), style?, num_id?, num_level?, copy_format_from?, copy_format_from_anchor?}), track_changes?, author?
+```
+
+**`delete_paragraphs`** — Delete one or more paragraphs or table blocks in one operation. Target by `paragraph_indices` (paragraph or table) and/or `anchors` (paragraph only).
+```
+file_path, paragraph_indices?, anchors?, track_changes?, author?
 ```
 
 ### Formatting
@@ -221,9 +243,9 @@ file_path, paragraph_indices, track_changes?, author?
 file_path, search, bold?, italic?, underline?, strikethrough?, highlight_color?, font_name?, font_size?, font_color?, case_sensitive?
 ```
 
-**`set_paragraph_formats`** — Apply alignment, spacing, indentation to one or more paragraphs in one operation. Each group bundles a list of paragraph indices with the formatting to apply to them.
+**`set_paragraph_formats`** — Apply alignment, spacing, indentation to one or more paragraphs in one operation. Each group targets paragraphs by `indices` and/or `anchors` and bundles the formatting to apply to them.
 ```
-file_path, groups (array of {indices, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
+file_path, groups (array of {indices?, anchors?, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
 ```
 
 **`highlight_text`** — Highlight matching text with a color.
@@ -231,9 +253,9 @@ file_path, groups (array of {indices, alignment?, space_before?, space_after?, l
 file_path, search, color?, case_sensitive?
 ```
 
-**`set_headings`** — Convert one or more paragraphs to headings (level 1-9) in one operation.
+**`set_headings`** — Convert one or more paragraphs to headings (level 1-9) in one operation. Target each by `paragraph_index` or `anchor`.
 ```
-file_path, headings (array of {paragraph_index, level})
+file_path, headings (array of {paragraph_index? | anchor?, level})
 ```
 
 ### Structure
@@ -317,9 +339,34 @@ file_path
 
 ### Tables
 
-**`edit_table_cells`** — Replace the text content of one or more table cells in a single open/save cycle. Cells can span different tables.
+**`read_table_structure`** — Inspect a table without reading the whole document: row/column dimensions and a short preview of every cell, plus each cell's merge info (`gridSpan` / `vMerge`). Indices are physical `w:tc` positions, matching `read_table_cell` / `edit_table_cells`.
+```
+file_path, block_index
+```
+
+**`read_table_cell`** — Read a single cell's paragraphs (text + style/alignment/numbering) and merge info, without reading the whole document.
+```
+file_path, block_index, row_index, col_index
+```
+
+**`edit_table_cells`** — Replace the text content of one or more table cells in a single open/save cycle. Cells can span different tables. A `\n` in `new_text` is a paragraph break: untracked edits replace the **whole cell**, turning each line into its own paragraph (so re-editing leaves no stale lines); tracked edits diff-replace the cell's first paragraph and render `\n` as a soft line break.
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
+```
+
+**`edit_table_paragraphs`** — Edit one specific paragraph inside a cell (cell-local `paragraph_index`) without replacing the whole cell. For surgically changing a single line of a multi-paragraph cell (e.g. one numbered-list item).
+```
+file_path, edits (array of {block_index, row_index, col_index, paragraph_index, new_text}), track_changes?, author?
+```
+
+**`delete_table_paragraphs`** — Delete one specific paragraph inside a cell. Keeps a blank paragraph if the deleted one was the cell's last (so the cell stays valid); real Word numbering renumbers the rest automatically.
+```
+file_path, targets (array of {block_index, row_index, col_index, paragraph_index}), track_changes?, author?
+```
+
+**`insert_table_paragraphs`** — Insert a paragraph inside a cell at a cell-local position (`-1`/out-of-range appends). Supports `num_id`/`num_level` and `copy_format_from` (a paragraph index within the same cell).
+```
+file_path, inserts (array of {block_index, row_index, col_index, position, text, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
 ```
 
 ### Footnotes
@@ -356,7 +403,7 @@ The savings are especially large for **tracked changes**, **comments**, and **ru
 
 Simple read and paragraph-format operations see smaller savings (~63–76%) since python-docx has clean APIs for these.
 
-Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 33 tools) pays for itself in 3–5 operations.
+Output tokens cost 5× more than input tokens, so eliminating code generation has an outsized cost impact. The one-time schema overhead (~2,500 tokens for 34 tools) pays for itself in 3–5 operations.
 
 ## Requirements
 

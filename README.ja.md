@@ -4,13 +4,13 @@
 
 ローカル [MCP](https://modelcontextprotocol.io/) サーバ。Word (.docx) ファイルの読み取り・編集を行う。Claude Code、Cursor、その他の MCP 対応クライアントで動作する。
 
-**33 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
+**34 ツール** — ドキュメント内容、書式設定、コメント、ページレイアウト、変更履歴を、ファイルアップロード不要の stdio トランスポートで処理する。
 
 ## 機能一覧
 
 | カテゴリ | ツール |
 |---------|--------|
-| **読み取り** | `read_document`, `get_document_info`, `search_text`, `list_images` |
+| **読み取り** | `read_document`, `get_document_info`, `search_text`, `list_images`, `get_paragraph_format`, `ensure_anchors` |
 | **編集** | `replace_texts`, `edit_paragraphs`, `insert_paragraphs`, `delete_paragraphs` |
 | **書式** | `format_text`, `set_paragraph_formats`, `highlight_text`, `set_headings` |
 | **構造** | `insert_table`, `create_document`, `apply_document_preset` |
@@ -18,7 +18,7 @@
 | **変更履歴** | `accept_all_changes`, `reject_all_changes` |
 | **ページレイアウト** | `get_page_layout`, `set_page_layout` |
 | **ヘッダ/フッタ** | `read_header_footer` |
-| **テーブル** | `edit_table_cells` |
+| **テーブル** | `read_table_structure`, `read_table_cell`, `edit_table_cells`, `edit_table_paragraphs`, `delete_table_paragraphs`, `insert_table_paragraphs` |
 | **脚注** | `read_footnotes` |
 
 ### 変更履歴 (Track Changes)
@@ -30,6 +30,18 @@
 `read_document` に `show_revisions: true` を渡すと、変更履歴が `[-削除-]` と `[+挿入+]` のアノテーション付きで表示される。デフォルトでは承認済みテキストのみ表示される。
 
 `accept_all_changes` / `reject_all_changes` で全リビジョンを一括承認・却下できる。
+
+### 安定アンカー
+
+段落は通常ブロックインデックスで指定するが、挿入・削除のたびに以降のブロックの番号がずれるため、複数ステップの編集では毎回読み直す必要がある。**アンカー**はこれを解決する。アンカーは段落に貼り付いたまま動く安定 ID（Word の `w14:paraId`）であり、インデックスのずれに影響されない。
+
+- 最初に **`ensure_anchors`** を 1 回呼ぶと、全段落にアンカーを割り当て、インデックス→アンカーの対応表を返す（Word で作成した文書の多くは既にアンカーを持つ。冪等なので何度呼んでもよい）。
+- `search_text` は各マッチの `anchor` を返し、`read_document` は `show_anchors: true` で各段落にインライン表示する。
+- 編集ツール（`edit_paragraphs`, `delete_paragraphs`, `set_paragraph_formats`, `set_headings`, `insert_paragraphs`）は `paragraph_index` の代わりに `anchor`（または `anchors`）を受け付ける。編集すると触れた段落・挿入した段落にもアンカーが自動付与され、`insert_paragraphs` は新規段落のアンカーを返すため、読み直さずに編集を続けられる。
+
+v1 のアンカーはトップレベル（body 直下）の段落のみが対象。テーブルセル内・コンテンツコントロール内の段落にはアンカーを付与しない。
+
+トップレベルのコンテンツコントロール（`w:sdt`）を含む文書では、ブロックインデックスを読み取り・検索・編集で統一しているため、どのツールも同じ番号で一致する。また `w:sdt` 内に位置するインデックスの段落の挿入・削除は拒否される（その場合はインデックス指定でその場編集する）。CHANGELOG の "Unified block-index space" を参照。
 
 ### ページレイアウト
 
@@ -145,9 +157,19 @@ file_path, query, case_sensitive?
 file_path
 ```
 
+**`get_paragraph_format`** — 段落の書式を取得する（スタイル、見出しレベル、配置、番号付け、インデント[twips]、行間[pt]）。`insert_paragraphs` の `copy_format_from` の参照元を探すときや、2 つの段落の見た目が異なる原因を調べるときに使う。値は `set_paragraph_formats` が受け付ける単位で返す。
+```
+file_path, paragraph_index
+```
+
+**`ensure_anchors`** — アンカーを持たないトップレベル段落すべてに安定アンカー（`w14:paraId`）を割り当て、インデックス→アンカー対応表を返す。冪等。[安定アンカー](#安定アンカー) を参照。
+```
+file_path
+```
+
 ### 編集
 
-すべての編集ツールは `track_changes` (デフォルト `true`) と `author` (デフォルト `"Claude"`) を受け付ける。
+すべての編集ツールは `track_changes` (デフォルト `true`) と `author` (デフォルト `"Claude"`) を受け付ける。以下の段落系ツールは `paragraph_index` の代わりに `anchor`（または `anchors`）でインデックスずれに強い指定ができる（[安定アンカー](#安定アンカー) 参照）。
 
 **`replace_texts`** — 1 回の open/save サイクルで 1 件以上の検索・置換を適用する。複数ランにまたがるテキストにも対応。
 - `track_changes: false` の場合、items は配列順に逐次適用される（後の item は前の item の置換結果にマッチし得る）。
@@ -156,19 +178,19 @@ file_path
 file_path, items ({search, replace, case_sensitive?} の配列), track_changes?, author?, include_headers_footers?
 ```
 
-**`edit_paragraphs`** — 1 回の open/save サイクルで 1 件以上の段落テキストを置換する。
+**`edit_paragraphs`** — 1 回の open/save サイクルで 1 件以上の段落テキストを置換する。各編集は `paragraph_index` か `anchor` で対象を指定する。`new_text` 中の `\n` は段落区切りとして扱う。変更履歴オフの編集は行ごとに別段落へ分割し（各段落は元の番号付け・インデントを継承）、変更履歴オンの編集は 1 段落のまま `\n` を改行（ソフトブレーク）として描画する。
 ```
-file_path, edits (array of {paragraph_index, new_text}), track_changes?, author?
-```
-
-**`insert_paragraphs`** — 1 回の操作で 1 件以上の段落を挿入する。インデックスシフトを内部で処理。
-```
-file_path, paragraphs (array of {text, position, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
+file_path, edits (array of {paragraph_index? | anchor?, new_text}), track_changes?, author?
 ```
 
-**`delete_paragraphs`** — 1 回の操作で 1 件以上の段落を削除する。インデックス再順序を内部で処理。
+**`insert_paragraphs`** — 1 回の操作で 1 件以上の段落を挿入する。各段落は `position`（ブロックインデックス）か `anchor` + `placement`（"before"/"after"）で配置し、新規段落のアンカーを返す。`text` 中の `\n` は段落区切りとして扱う（変更履歴オフ: 行ごとに別段落、変更履歴オン: ソフトブレーク）。同一 `position` に複数段落を指定した場合、ドキュメント上では配列と逆順に並ぶため、逆順に並べるか個別呼び出しにする（anchor 配置は配列順を保つ）。
 ```
-file_path, paragraph_indices, track_changes?, author?
+file_path, paragraphs (array of {text, position? | (anchor + placement), style?, num_id?, num_level?, copy_format_from?, copy_format_from_anchor?}), track_changes?, author?
+```
+
+**`delete_paragraphs`** — 1 回の操作で 1 件以上の段落・テーブルブロックを削除する。`paragraph_indices`（段落またはテーブル）と `anchors`（段落のみ）で指定する。
+```
+file_path, paragraph_indices?, anchors?, track_changes?, author?
 ```
 
 ### 書式設定
@@ -178,9 +200,9 @@ file_path, paragraph_indices, track_changes?, author?
 file_path, search, bold?, italic?, underline?, strikethrough?, highlight_color?, font_name?, font_size?, font_color?, case_sensitive?
 ```
 
-**`set_paragraph_formats`** — 1 回の操作で 1 件以上の段落に配置・間隔・インデントを適用する。各 group は段落インデックスのリストと適用する書式をまとめる。
+**`set_paragraph_formats`** — 1 回の操作で 1 件以上の段落に配置・間隔・インデントを適用する。各 group は `indices` と/または `anchors` で対象段落を指定し、適用する書式をまとめる。
 ```
-file_path, groups (array of {indices, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
+file_path, groups (array of {indices?, anchors?, alignment?, space_before?, space_after?, line_spacing?, indent_left?, indent_right?, first_line_indent?, hanging_indent?})
 ```
 
 **`highlight_text`** — マッチするテキストにハイライトカラーを適用。
@@ -188,9 +210,9 @@ file_path, groups (array of {indices, alignment?, space_before?, space_after?, l
 file_path, search, color?, case_sensitive?
 ```
 
-**`set_headings`** — 1 件以上の段落を見出しに変換する (レベル 1-9)。
+**`set_headings`** — 1 件以上の段落を見出しに変換する (レベル 1-9)。各項目は `paragraph_index` か `anchor` で対象を指定する。
 ```
-file_path, headings (array of {paragraph_index, level})
+file_path, headings (array of {paragraph_index? | anchor?, level})
 ```
 
 ### 構造
@@ -274,9 +296,34 @@ file_path
 
 ### テーブル
 
-**`edit_table_cells`** — 1 回の open/save サイクルで 1 件以上のテーブルセルを置換する。異なるテーブルにまたがることも可能。
+**`read_table_structure`** — ドキュメント全体を読まずにテーブルを調べる。行・列数と各セルの短いプレビュー、各セルの結合情報（`gridSpan` / `vMerge`）を返す。インデックスは物理的な `w:tc` 位置で、`read_table_cell` / `edit_table_cells` と同じ規約。
+```
+file_path, block_index
+```
+
+**`read_table_cell`** — ドキュメント全体を読まずに 1 つのセルを読む。セルの段落（テキスト + スタイル・配置・番号付け）と結合情報を返す。
+```
+file_path, block_index, row_index, col_index
+```
+
+**`edit_table_cells`** — 1 回の open/save サイクルで 1 件以上のテーブルセルを置換する。異なるテーブルにまたがることも可能。`new_text` 中の `\n` は段落区切りとして扱う。変更履歴オフの編集は**セル全体**を置換し、各行を個別の段落にする（再編集しても古い行が残らない）。変更履歴オンの編集はセル先頭段落を差分置換し、`\n` をソフトブレークとして描画する。
 ```
 file_path, edits (array of {block_index, row_index, col_index, new_text}), track_changes?, author?
+```
+
+**`edit_table_paragraphs`** — セル全体を置換せず、セル内の特定の 1 段落だけを編集する（セル内ローカルの `paragraph_index` で指定）。複数段落セルの 1 行（番号付きリストの 1 項目など）をピンポイントで変更したいときに使う。
+```
+file_path, edits (array of {block_index, row_index, col_index, paragraph_index, new_text}), track_changes?, author?
+```
+
+**`delete_table_paragraphs`** — セル内の特定の 1 段落を削除する。セルの最後の段落を削除した場合は空段落を残してセルを有効に保つ。実際の Word 番号付けは残りを自動的に振り直す。
+```
+file_path, targets (array of {block_index, row_index, col_index, paragraph_index}), track_changes?, author?
+```
+
+**`insert_table_paragraphs`** — セル内ローカル位置に段落を挿入する（`-1`/範囲外は末尾に追加）。`num_id`/`num_level` と `copy_format_from`（同一セル内の段落インデックス）に対応。
+```
+file_path, inserts (array of {block_index, row_index, col_index, position, text, style?, num_id?, num_level?, copy_format_from?}), track_changes?, author?
 ```
 
 ### 脚注
@@ -313,7 +360,7 @@ AI エージェントは Raw Python (python-docx) でも DOCX を操作できる
 
 単純な読み取り・段落書式は python-docx のクリーンな API により削減幅が小さい (~63–76%)。
 
-出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。33 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
+出力トークンは入力トークンの 5 倍の単価であるため、コード生成の省略はコストに大きく影響する。34 ツールのスキーマオーバーヘッド (~2,500 トークン) は 3–5 操作で回収できる。
 
 ## 動作要件
 
