@@ -2536,3 +2536,44 @@ describe("Codex re-gate: hyperlink handling in edit + accept", () => {
     expect(xmlIsWellFormed(p)).toBe(true);
   });
 });
+
+// Codex re-gate (2nd): a hyperlink is a TRANSPARENT text container — edit must
+// recurse into it, preserving a structural run (footnote/field) inside the link
+// and recording the old link text as a tracked deletion (not a silent drop).
+describe("Codex re-gate: hyperlink transparency on edit", () => {
+  const docWith = (inner: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${inner}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`;
+
+  it("preserves a footnote reference nested inside a hyperlink across an edit", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await writeMinimalDocx(
+      p,
+      docWith(
+        `<w:p><w:hyperlink r:id="rId9" w:history="1"><w:r><w:t xml:space="preserve">linktext</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:hyperlink></w:p>`,
+      ),
+    );
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "NEWTEXT" }], false);
+    const xml = await readRawDocXml(p);
+    expect((xml.match(/<w:footnoteReference/g) ?? []).length).toBe(1); // anchor survived
+    expect(xml).not.toContain("linktext"); // old link text replaced
+    expect(xml).toContain("NEWTEXT");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+
+  it("records a tracked deletion for the old text when editing a hyperlink-only paragraph", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await writeMinimalDocx(
+      p,
+      docWith(
+        `<w:p><w:hyperlink r:id="rId9" w:history="1"><w:r><w:t xml:space="preserve">oldlink</w:t></w:r></w:hyperlink></w:p>`,
+      ),
+    );
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "newtext" }], true, "Ed");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("w:del"); // the removed old link text is a tracked deletion
+    expect(xml).toContain("w:ins"); // the new text is a tracked insertion
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});

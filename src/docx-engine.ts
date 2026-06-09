@@ -1407,6 +1407,25 @@ function isStructuralParagraphChild(child: XNode): boolean {
   return false;
 }
 
+/**
+ * Yield a paragraph's inline children, descending TRANSPARENTLY through
+ * <w:hyperlink>/<w:smartTag> wrappers. These are TEXT containers, not opaque
+ * structural elements: their inner runs' text is part of the paragraph's
+ * editable text (so it enters the tracked diff baseline and gets replaced),
+ * and any structural run inside them (footnote/endnote/field) must still be
+ * collected. The wrapper itself is dropped on a text replacement.
+ */
+function* iterInlineChildren(children: XNode[]): Generator<XNode> {
+  for (const child of children) {
+    if (child["w:hyperlink"] !== undefined || child["w:smartTag"] !== undefined) {
+      const tag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      yield* iterInlineChildren(child[tag] as XNode[]);
+    } else {
+      yield child;
+    }
+  }
+}
+
 /** Replace the text content of a w:p element, preserving pPr, structural elements, and optionally tracking changes. */
 function replaceParagraphText(
   element: XNode,
@@ -1423,7 +1442,7 @@ function replaceParagraphText(
   // Collect structural elements that must be preserved (bookmarks, comment
   // ranges, drawings, footnote/endnote references, field codes, hyperlinks).
   const structuralElements: XNode[] = [];
-  for (const child of pChildren) {
+  for (const child of iterInlineChildren(pChildren)) {
     if (isStructuralParagraphChild(child)) structuralElements.push(child);
   }
 
@@ -1431,7 +1450,7 @@ function replaceParagraphText(
     // Extract current full text and first rPr from existing runs
     let oldText = "";
     let firstRPr: XNode | null = null;
-    for (const child of pChildren) {
+    for (const child of iterInlineChildren(pChildren)) {
       if (child["w:r"]) {
         const runC = child["w:r"] as XNode[];
         // Structural runs (drawings, footnote/endnote refs, field codes) are
@@ -1491,7 +1510,7 @@ function replaceParagraphText(
  */
 function collectStructuralElements(pChildren: XNode[]): XNode[] {
   const out: XNode[] = [];
-  for (const child of pChildren) {
+  for (const child of iterInlineChildren(pChildren)) {
     if (isStructuralParagraphChild(child)) out.push(child);
   }
   return out;
@@ -1500,7 +1519,7 @@ function collectStructuralElements(pChildren: XNode[]): XNode[] {
 /** Return the rPr of the first non-structural run in a paragraph (skipping
  * drawing/footnote/endnote/field runs, whose rPr is not body-text styling). */
 function firstRunRPr(pChildren: XNode[]): XNode | null {
-  for (const child of pChildren) {
+  for (const child of iterInlineChildren(pChildren)) {
     if (child["w:r"]) {
       const runC = child["w:r"] as XNode[];
       if (runIsStructural(runC)) continue;
