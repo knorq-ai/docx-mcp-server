@@ -2576,4 +2576,37 @@ describe("Codex re-gate: hyperlink transparency on edit", () => {
     expect(xml).toContain("w:ins"); // the new text is a tracked insertion
     expect(xmlIsWellFormed(p)).toBe(true);
   });
+
+  it("blocks a tracked edit when a pending revision sits inside a hyperlink (guard follows the transparent walk)", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await writeMinimalDocx(
+      p,
+      docWith(
+        `<w:p><w:hyperlink r:id="rId9"><w:ins w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">pending</w:t></w:r></w:ins></w:hyperlink></w:p>`,
+      ),
+    );
+    let err: unknown;
+    try {
+      await editParagraphs(p, [{ paragraphIndex: 0, newText: "X" }], true, "Ed");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.PENDING_REVISIONS);
+  });
+
+  it("treats a w:smartTag as a transparent text container too (its text is replaced)", async () => {
+    const p = tmpDocxPath();
+    trackTmpFile(p);
+    await writeMinimalDocx(
+      p,
+      docWith(`<w:p><w:smartTag><w:r><w:t xml:space="preserve">smarttext</w:t></w:r></w:smartTag></w:p>`),
+    );
+    await editParagraphs(p, [{ paragraphIndex: 0, newText: "NEW" }], false);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("smarttext");
+    expect(xml).toContain("NEW");
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
 });

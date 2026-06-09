@@ -166,6 +166,13 @@ export function paragraphHasRevisions(pChildren: XNode[]): boolean {
         return true;
       }
     }
+    // Recurse into transparent inline wrappers (w:hyperlink / w:smartTag): the
+    // edit logic descends into them (iterInlineChildren), so a pending revision
+    // inside one must also block a tracked edit — otherwise the guard is bypassed.
+    if (child["w:hyperlink"] !== undefined || child["w:smartTag"] !== undefined) {
+      const wtag = child["w:hyperlink"] !== undefined ? "w:hyperlink" : "w:smartTag";
+      if (paragraphHasRevisions(child[wtag] as XNode[])) return true;
+    }
   }
   const pPr = findOne(pChildren, "w:pPr");
   if (pPr) {
