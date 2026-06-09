@@ -1359,6 +1359,51 @@ export async function replaceTexts(
 // Shared helper: replace paragraph text content in-place
 // ---------------------------------------------------------------------------
 
+/**
+ * True if a run (the children array of a <w:r>) carries inline content that a
+ * text replacement must PRESERVE rather than rewrite: a drawing (image), a
+ * footnote/endnote reference, or a field code (begin/separate/end fldChar or
+ * the field instruction text). Such runs are kept verbatim and the new text is
+ * placed around them; dropping them would orphan footnote/endnote bodies in
+ * footnotes.xml/endnotes.xml and break cross-references / page-number fields
+ * (N4). Their own text (extractRunText) is therefore EXCLUDED from the
+ * old-text diff baseline, exactly as drawing runs already were.
+ */
+function runIsStructural(runC: XNode[]): boolean {
+  return runC.some(
+    (rc) =>
+      rc["w:drawing"] !== undefined ||
+      rc["w:footnoteReference"] !== undefined ||
+      rc["w:endnoteReference"] !== undefined ||
+      rc["w:fldChar"] !== undefined ||
+      rc["w:instrText"] !== undefined,
+  );
+}
+
+/**
+ * True if a paragraph child must be preserved across a text replacement:
+ * bookmark/comment range markers, a <w:fldSimple> field, a <w:hyperlink>
+ * wrapper, or a <w:r> for which runIsStructural() holds. Mirrors the inline
+ * preservation logic so all replacement paths agree (N4).
+ */
+function isStructuralParagraphChild(child: XNode): boolean {
+  if (
+    child["w:bookmarkStart"] !== undefined ||
+    child["w:bookmarkEnd"] !== undefined ||
+    child["w:commentRangeStart"] !== undefined ||
+    child["w:commentRangeEnd"] !== undefined ||
+    child["w:commentReference"] !== undefined ||
+    child["w:fldSimple"] !== undefined ||
+    child["w:hyperlink"] !== undefined
+  ) {
+    return true;
+  }
+  if (child["w:r"]) {
+    return runIsStructural(child["w:r"] as XNode[]);
+  }
+  return false;
+}
+
 /** Replace the text content of a w:p element, preserving pPr, structural elements, and optionally tracking changes. */
 function replaceParagraphText(
   element: XNode,
@@ -1372,22 +1417,11 @@ function replaceParagraphText(
   const pChildren = element["w:p"] as XNode[];
   const pPr = findOne(pChildren, "w:pPr");
 
-  // Collect structural elements that must be preserved (bookmarks, comment ranges, drawings)
+  // Collect structural elements that must be preserved (bookmarks, comment
+  // ranges, drawings, footnote/endnote references, field codes, hyperlinks).
   const structuralElements: XNode[] = [];
   for (const child of pChildren) {
-    if (
-      child["w:bookmarkStart"] !== undefined ||
-      child["w:bookmarkEnd"] !== undefined ||
-      child["w:commentRangeStart"] !== undefined ||
-      child["w:commentRangeEnd"] !== undefined ||
-      child["w:commentReference"] !== undefined
-    ) {
-      structuralElements.push(child);
-    } else if (child["w:r"]) {
-      const runC = child["w:r"] as XNode[];
-      const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
-      if (hasDrawing) structuralElements.push(child);
-    }
+    if (isStructuralParagraphChild(child)) structuralElements.push(child);
   }
 
   if (ctx) {
@@ -1397,8 +1431,9 @@ function replaceParagraphText(
     for (const child of pChildren) {
       if (child["w:r"]) {
         const runC = child["w:r"] as XNode[];
-        const hasDrawing = runC.some((rc) => rc["w:drawing"] !== undefined);
-        if (hasDrawing) continue;
+        // Structural runs (drawings, footnote/endnote refs, field codes) are
+        // preserved verbatim, so their text must NOT enter the diff baseline.
+        if (runIsStructural(runC)) continue;
         const rPr = getRunRPr(runC);
         if (!firstRPr && rPr) firstRPr = rPr;
         oldText += extractRunText(runC);
@@ -1406,6 +1441,7 @@ function replaceParagraphText(
         for (const insChild of child["w:ins"]) {
           if (insChild["w:r"]) {
             const runC = insChild["w:r"] as XNode[];
+            if (runIsStructural(runC)) continue;
             const rPr = getRunRPr(runC);
             if (!firstRPr && rPr) firstRPr = rPr;
             oldText += extractRunText(runC);
@@ -1453,28 +1489,18 @@ function replaceParagraphText(
 function collectStructuralElements(pChildren: XNode[]): XNode[] {
   const out: XNode[] = [];
   for (const child of pChildren) {
-    if (
-      child["w:bookmarkStart"] !== undefined ||
-      child["w:bookmarkEnd"] !== undefined ||
-      child["w:commentRangeStart"] !== undefined ||
-      child["w:commentRangeEnd"] !== undefined ||
-      child["w:commentReference"] !== undefined
-    ) {
-      out.push(child);
-    } else if (child["w:r"]) {
-      const runC = child["w:r"] as XNode[];
-      if (runC.some((rc) => rc["w:drawing"] !== undefined)) out.push(child);
-    }
+    if (isStructuralParagraphChild(child)) out.push(child);
   }
   return out;
 }
 
-/** Return the rPr of the first non-drawing run in a paragraph, cloned. */
+/** Return the rPr of the first non-structural run in a paragraph (skipping
+ * drawing/footnote/endnote/field runs, whose rPr is not body-text styling). */
 function firstRunRPr(pChildren: XNode[]): XNode | null {
   for (const child of pChildren) {
     if (child["w:r"]) {
       const runC = child["w:r"] as XNode[];
-      if (runC.some((rc) => rc["w:drawing"] !== undefined)) continue;
+      if (runIsStructural(runC)) continue;
       const rPr = getRunRPr(runC);
       if (rPr) return rPr;
     }
@@ -2272,6 +2298,18 @@ export async function formatText(
   formatting: TextFormatting,
   caseSensitive: boolean = false,
 ): Promise<string> {
+  // Validate font size BEFORE the lock so a negative/absurd value never reaches
+  // <w:sz>/<w:szCs> (ST_HpsMeasure is unsigned half-points; Word caps at
+  // 1638 pt). 0 is treated as "unset" elsewhere (the `if (fmt.fontSize)` gate),
+  // so only sign/range is the gap here (N11).
+  if (formatting.fontSize !== undefined && formatting.fontSize !== 0) {
+    if (!Number.isFinite(formatting.fontSize) || formatting.fontSize < 0 || formatting.fontSize > 1638) {
+      throw new EngineError(
+        ErrorCode.INVALID_PARAMETER,
+        `Font size must be between 0 and 1638 pt. Got: ${formatting.fontSize}.`,
+      );
+    }
+  }
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
@@ -3239,6 +3277,14 @@ export async function highlightText(
 // 15. insert_table
 // ---------------------------------------------------------------------------
 
+/** Bounds for insert_table dimensions (defense-in-depth; also enforced by the
+ * MCP zod schema). cols ≤ 63 matches Word's column limit; rows ≤ 1000 is a sane
+ * document bound; the rows*cols ≤ 20000 product cap is the OOM guard — a single
+ * bad call must not exhaust the long-lived server's heap. */
+const MAX_TABLE_COLS = 63;
+const MAX_TABLE_ROWS = 1000;
+const MAX_TABLE_CELLS = 20000;
+
 export async function insertTable(
   filePath: string,
   position: number,
@@ -3246,6 +3292,39 @@ export async function insertTable(
   cols: number,
   data?: string[][],
 ): Promise<string> {
+  // Validate dimensions BEFORE acquiring the file lock or building any nodes,
+  // so a hostile/huge count fails fast and can never OOM the process (N2/N9).
+  if (!Number.isInteger(rows) || !Number.isInteger(cols)) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Table rows and cols must be integers. Got rows=${rows}, cols=${cols}.`,
+    );
+  }
+  if (rows < 1 || cols < 1) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Table rows and cols must be at least 1. Got rows=${rows}, cols=${cols}.`,
+    );
+  }
+  if (cols > MAX_TABLE_COLS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Table cols must be at most ${MAX_TABLE_COLS} (Word's column limit). Got ${cols}.`,
+    );
+  }
+  if (rows > MAX_TABLE_ROWS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Table rows must be at most ${MAX_TABLE_ROWS}. Got ${rows}.`,
+    );
+  }
+  if (rows * cols > MAX_TABLE_CELLS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Table is too large: rows*cols must be at most ${MAX_TABLE_CELLS}. Got ${rows}x${cols}=${rows * cols}.`,
+    );
+  }
+
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);
@@ -3321,6 +3400,11 @@ export async function insertTable(
 
 /** Set pStyle to Heading{level} and outlineLvl to level-1 on a w:p element. */
 function applyHeadingLevel(pChildren: XNode[], level: number): void {
+  // Defensive: callers validate, but never emit a fractional style id /
+  // outlineLvl (both must be integers per OOXML; see setHeadings, N5).
+  if (!Number.isInteger(level) || level < 1 || level > 9) {
+    throw new EngineError(ErrorCode.INVALID_PARAMETER, `Heading level must be an integer between 1 and 9. Got: ${level}.`);
+  }
   let pPr = findOne(pChildren, "w:pPr");
   if (!pPr) {
     pPr = el("w:pPr");
@@ -3365,10 +3449,13 @@ export async function setHeadings(
     return `No headings to set.`;
   }
 
-  // Validate levels upfront (before acquiring file lock)
+  // Validate levels upfront (before acquiring file lock). Must be an INTEGER in
+  // 1..9 — a fractional level (e.g. 1.5) would emit a nonexistent "Heading1.5"
+  // style and a schema-invalid outlineLvl "0.5" (ST_DecimalNumber is integer),
+  // which python-docx then chokes on (N5).
   for (const item of items) {
-    if (item.level < 1 || item.level > 9) {
-      throw new EngineError(ErrorCode.INVALID_PARAMETER, `Heading level must be between 1 and 9. Got: ${item.level}.`);
+    if (!Number.isInteger(item.level) || item.level < 1 || item.level > 9) {
+      throw new EngineError(ErrorCode.INVALID_PARAMETER, `Heading level must be an integer between 1 and 9. Got: ${item.level}.`);
     }
   }
 
@@ -3462,10 +3549,49 @@ export async function getPageLayout(filePath: string): Promise<string> {
 // 18. set_page_layout
 // ---------------------------------------------------------------------------
 
+// OOXML page geometry bounds (ECMA-376). w:w/w:h are unsigned (ST_TwipsMeasure)
+// and Word caps a page at 22 in = 31680 twips ≈ 558.8 mm; margins are signed in
+// the schema but a negative page margin is nonsensical here, so we require ≥ 0
+// and within the same upper bound. mm bounds derived from the twip limits (N10).
+const MAX_PAGE_TWIPS = 31680; // 22 inches
+const MAX_PAGE_MM = MAX_PAGE_TWIPS / TWIPS_PER_MM; // ≈ 558.8
+
+/** Throw INVALID_PARAMETER if a page dimension (width/height) is out of range. */
+function validatePageDimMm(name: string, mm: number): void {
+  if (!Number.isFinite(mm) || mm <= 0 || mm > MAX_PAGE_MM) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `${name} must be > 0 and ≤ ${MAX_PAGE_MM.toFixed(1)} mm. Got: ${mm}.`,
+    );
+  }
+}
+
+/** Throw INVALID_PARAMETER if a margin is negative or out of range. */
+function validateMarginMm(name: string, mm: number): void {
+  if (!Number.isFinite(mm) || mm < 0 || mm > MAX_PAGE_MM) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `${name} must be ≥ 0 and ≤ ${MAX_PAGE_MM.toFixed(1)} mm. Got: ${mm}.`,
+    );
+  }
+}
+
 export async function setPageLayout(
   filePath: string,
   options: PageLayoutOptions,
 ): Promise<string> {
+  // Validate custom geometry BEFORE the file lock so a negative/absurd value is
+  // rejected without writing schema-invalid (unsigned) w:w/w:h/margins (N10).
+  if (options.widthMm !== undefined) validatePageDimMm("Page width", options.widthMm);
+  if (options.heightMm !== undefined) validatePageDimMm("Page height", options.heightMm);
+  if (options.topMm !== undefined) validateMarginMm("Top margin", options.topMm);
+  if (options.rightMm !== undefined) validateMarginMm("Right margin", options.rightMm);
+  if (options.bottomMm !== undefined) validateMarginMm("Bottom margin", options.bottomMm);
+  if (options.leftMm !== undefined) validateMarginMm("Left margin", options.leftMm);
+  if (options.headerMm !== undefined) validateMarginMm("Header distance", options.headerMm);
+  if (options.footerMm !== undefined) validateMarginMm("Footer distance", options.footerMm);
+  if (options.gutterMm !== undefined) validateMarginMm("Gutter margin", options.gutterMm);
+
   return withFileLock(filePath, async () => {
     const handle = await openDocx(filePath);
     const parsed = await parseDocXml(handle);

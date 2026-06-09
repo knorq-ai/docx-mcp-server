@@ -58,6 +58,7 @@ import {
   ErrorCode,
   formatText,
   highlightText,
+  setPageLayout,
 } from "../docx-engine.js";
 
 afterEach(cleanupTmpFiles);
@@ -1759,5 +1760,334 @@ describe("F3 (Codex re-review): createDocument title normalizes CRLF", () => {
     expect(xml).toContain("Single Title");
     expect(xml).not.toContain("<w:br");
     expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});
+
+// =========================================================================
+// Round-4 QA findings: input validation (N2/N9, N5, N10, N11) + content
+// preservation (N4). Each finding had a confirmed repro in the QA sweep.
+// =========================================================================
+
+// -------------------------------------------------------------------------
+// N2 / N9 — insertTable must bound rows/cols so a single bad call cannot OOM
+// the long-lived server, and rows<1/cols<1 must NOT emit an empty invalid
+// <w:tbl> with a misleading "0x0" success.
+// -------------------------------------------------------------------------
+describe("N2/N9: insertTable bounds rows/cols (no OOM, no empty invalid table)", () => {
+  const badDims: Array<[string, number, number]> = [
+    ["rows = 0", 0, 2],
+    ["cols = 0", 2, 0],
+    ["rows = -3", -3, 2],
+    ["cols = -3", 2, -3],
+    ["rows = 1.5 (non-integer)", 1.5, 2],
+    ["cols = 1.5 (non-integer)", 2, 1.5],
+    ["rows = NaN", NaN, 2],
+    ["cols = NaN", 2, NaN],
+    ["rows over cap (3000)", 3000, 2],
+    ["cols over cap (3000)", 2, 3000],
+    ["product over cap (200x200=40000)", 200, 200],
+  ];
+
+  for (const [label, rows, cols] of badDims) {
+    it(`rejects ${label} with INVALID_PARAMETER quickly (no OOM/hang)`, async () => {
+      const p = await createTmpDoc("body");
+      const start = Date.now();
+      let err: unknown;
+      try {
+        await insertTable(p, -1, rows, cols);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(EngineError);
+      expect((err as EngineError).code).toBe(ErrorCode.INVALID_PARAMETER);
+      // Must fail fast — a real OOM/giant-build would take seconds.
+      expect(Date.now() - start).toBeLessThan(2000);
+    });
+  }
+
+  it("a normal small 2x3 table still inserts and round-trips", async () => {
+    const p = await createTmpDoc("body");
+    const msg = await insertTable(p, -1, 2, 3, [["a", "b", "c"], ["d", "e", "f"]]);
+    expect(msg).toContain("2x3");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain("<w:tbl>");
+    // exactly 3 gridCols and 2 rows
+    expect((xml.match(/<w:gridCol/g) ?? []).length).toBe(3);
+    expect((xml.match(/<w:tr>/g) ?? []).length).toBe(2);
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("never emits a 0x0 empty <w:tbl> nor a 0/negative success message", async () => {
+    const p = await createTmpDoc("body");
+    await expect(insertTable(p, -1, 0, 0)).rejects.toThrow();
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toContain("<w:tbl>");
+  });
+});
+
+// -------------------------------------------------------------------------
+// N5 — setHeadings must reject non-integer levels (1.5 → "Heading1.5" style +
+// outlineLvl "0.5", both schema-invalid; python-docx then raises on .style).
+// -------------------------------------------------------------------------
+describe("N5: setHeadings rejects non-integer level; integer level round-trips", () => {
+  for (const lvl of [1.5, NaN]) {
+    it(`level=${lvl} → INVALID_PARAMETER`, async () => {
+      const p = await createTmpDoc("Heading me");
+      let err: unknown;
+      try {
+        await setHeadings(p, [{ paragraphIndex: 0, level: lvl }]);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(EngineError);
+      expect((err as EngineError).code).toBe(ErrorCode.INVALID_PARAMETER);
+      // No invalid style leaked into the file.
+      const xml = await readRawDocXml(p);
+      expect(xml).not.toMatch(/Heading\d+\.\d+/);
+      expect(xml).not.toMatch(/w:outlineLvl w:val="\d+\.\d+"/);
+    });
+  }
+
+  it("an integer level=2 emits Heading2 / outlineLvl 1 and round-trips", async () => {
+    const p = await createTmpDoc("Heading me");
+    await setHeadings(p, [{ paragraphIndex: 0, level: 2 }]);
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain('<w:pStyle w:val="Heading2"');
+    expect(xml).toContain('<w:outlineLvl w:val="1"');
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// N10 — setPageLayout must reject negative / absurd page geometry (OOXML w:w /
+// w:h are unsigned, ~1..31680 twips).
+// -------------------------------------------------------------------------
+describe("N10: setPageLayout rejects negative/absurd geometry; A4 round-trips", () => {
+  it("a negative width → INVALID_PARAMETER (no negative w:w written)", async () => {
+    const p = await createTmpDoc("body");
+    let err: unknown;
+    try {
+      await setPageLayout(p, { widthMm: -50 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INVALID_PARAMETER);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toMatch(/w:w="-\d+"/);
+  });
+
+  it("an absurd width (1e9 mm) → INVALID_PARAMETER", async () => {
+    const p = await createTmpDoc("body");
+    let err: unknown;
+    try {
+      await setPageLayout(p, { widthMm: 1e9 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INVALID_PARAMETER);
+  });
+
+  it("a negative margin → INVALID_PARAMETER", async () => {
+    const p = await createTmpDoc("body");
+    let err: unknown;
+    try {
+      await setPageLayout(p, { topMm: -10 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INVALID_PARAMETER);
+  });
+
+  it("a normal A4 portrait layout still applies and round-trips", async () => {
+    const p = await createTmpDoc("body");
+    const msg = await setPageLayout(p, { widthMm: 210, heightMm: 297, topMm: 25.4 });
+    expect(msg).toContain("page size");
+    const xml = await readRawDocXml(p);
+    expect(xml).toMatch(/<w:pgSz[^>]*w:w="11906"/);
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// N11 — formatText font_size must reject negative/absurd (ST_HpsMeasure is
+// unsigned half-points); a normal size applies <w:sz w:val="24"/>.
+// -------------------------------------------------------------------------
+describe("N11: formatText font_size rejects negative/absurd; 12 → sz 24", () => {
+  it("fontSize=-8 → INVALID_PARAMETER (no negative w:sz written)", async () => {
+    const p = await createTmpDoc("color me");
+    let err: unknown;
+    try {
+      await formatText(p, "color me", { fontSize: -8 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INVALID_PARAMETER);
+    const xml = await readRawDocXml(p);
+    expect(xml).not.toMatch(/w:sz w:val="-\d+"/);
+  });
+
+  it("fontSize=1e9 → INVALID_PARAMETER", async () => {
+    const p = await createTmpDoc("color me");
+    let err: unknown;
+    try {
+      await formatText(p, "color me", { fontSize: 1e9 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).code).toBe(ErrorCode.INVALID_PARAMETER);
+  });
+
+  it("fontSize=12 applies <w:sz w:val=\"24\"/> and round-trips", async () => {
+    const p = await createTmpDoc("color me");
+    await formatText(p, "color me", { fontSize: 12 });
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain('<w:sz w:val="24"');
+    expect(xml).toContain('<w:szCs w:val="24"');
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// N4 — editParagraphs must PRESERVE footnote/endnote reference runs and field
+// codes (fldChar / instrText / fldSimple); previously they were dropped,
+// orphaning footnote content and breaking cross-references / page numbers.
+// -------------------------------------------------------------------------
+
+/**
+ * Build a DOCX with:
+ *  - para 0: "Lead" + a footnoteReference run + " tail"
+ *  - para 1: a REF field (begin fldChar / instrText / end fldChar) + an
+ *    endnoteReference run
+ * plus the minimal footnotes.xml / endnotes.xml parts so python-docx opens it.
+ */
+async function createDocWithNotesAndFields(): Promise<string> {
+  const p = tmpDocxPath();
+  trackTmpFile(p);
+  const JSZip = (await import("jszip")).default;
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:r><w:t>Lead</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r><w:r><w:t> tail</w:t></w:r></w:p>
+<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF _Ref1 \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>see</w:t></w:r><w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteReference w:id="1"/></w:r></w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+  const footnotesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
+<w:footnote w:id="1"><w:p><w:r><w:t>The footnote body.</w:t></w:r></w:p></w:footnote>
+</w:footnotes>`;
+  const endnotesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>
+<w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>
+<w:endnote w:id="1"><w:p><w:r><w:t>The endnote body.</w:t></w:r></w:p></w:endnote>
+</w:endnotes>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
+<w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/></w:style>
+<w:style w:type="character" w:styleId="EndnoteReference"><w:name w:val="endnote reference"/></w:style>
+</w:styles>`;
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
+<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>
+</Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
+<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>
+</Relationships>`;
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", contentTypesXml);
+  zip.file("_rels/.rels", relsXml);
+  zip.file("word/document.xml", documentXml);
+  zip.file("word/styles.xml", stylesXml);
+  zip.file("word/footnotes.xml", footnotesXml);
+  zip.file("word/endnotes.xml", endnotesXml);
+  zip.file("word/_rels/document.xml.rels", docRelsXml);
+  const buf = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  await fs.writeFile(p, buf);
+  return p;
+}
+
+function countMatches(xml: string, re: RegExp): number {
+  return (xml.match(re) ?? []).length;
+}
+
+describe("N4: editParagraphs preserves footnote/endnote refs and field codes", () => {
+  for (const tracked of [true, false]) {
+    it(`(${tracked ? "tracked" : "untracked"}) keeps footnoteRef/endnoteRef/fldChar/instrText and inserts new text`, async () => {
+      const p = await createDocWithNotesAndFields();
+      const before = await readRawDocXml(p);
+      const fnBefore = countMatches(before, /<w:footnoteReference\b/g);
+      const enBefore = countMatches(before, /<w:endnoteReference\b/g);
+      const fldBefore = countMatches(before, /<w:fldChar\b/g);
+      const instrBefore = countMatches(before, /<w:instrText\b/g);
+      expect(fnBefore).toBe(1);
+      expect(enBefore).toBe(1);
+      expect(fldBefore).toBe(2);
+      expect(instrBefore).toBe(1);
+
+      await editParagraphs(
+        p,
+        [
+          { paragraphIndex: 0, newText: "Lead REWRITTEN tail" },
+          { paragraphIndex: 1, newText: "see REWRITTEN" },
+        ],
+        tracked,
+      );
+
+      const after = await readRawDocXml(p);
+      // Structural runs preserved (count unchanged).
+      expect(countMatches(after, /<w:footnoteReference\b/g)).toBe(fnBefore);
+      expect(countMatches(after, /<w:endnoteReference\b/g)).toBe(enBefore);
+      expect(countMatches(after, /<w:fldChar\b/g)).toBe(fldBefore);
+      expect(countMatches(after, /<w:instrText\b/g)).toBe(instrBefore);
+      // New text present.
+      expect(after).toContain("REWRITTEN");
+      // File well-formed + openable.
+      expect(xmlIsWellFormed(p)).toBe(true);
+      expect(pythonDocxOpens(p)).toBe(true);
+    });
+  }
+
+  it("(untracked) preserves a fldSimple field run", async () => {
+    const pth = tmpDocxPath();
+    trackTmpFile(pth);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:p><w:r><w:t>Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t> of N</w:t></w:r></w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(pth, documentXml);
+    await editParagraphs(pth, [{ paragraphIndex: 0, newText: "Page X of Y" }], false);
+    const after = await readRawDocXml(pth);
+    expect(countMatches(after, /<w:fldSimple\b/g)).toBe(1);
+    expect(after).toContain("Page X of Y");
+    expect(xmlIsWellFormed(pth)).toBe(true);
   });
 });

@@ -635,7 +635,12 @@ server.tool(
       .optional()
       .describe("Highlight color: yellow, green, cyan, magenta, blue, red, etc."),
     font_name: z.string().optional().describe("Font family name"),
-    font_size: z.number().optional().describe("Font size in points (e.g. 12)"),
+    font_size: z
+      .number()
+      .positive()
+      .max(1638)
+      .optional()
+      .describe("Font size in points (e.g. 12; 0–1638, Word's max)"),
     font_color: z
       .string()
       .optional()
@@ -1041,8 +1046,18 @@ server.tool(
     position: z
       .number()
       .describe("Block index to insert before (-1 for end)"),
-    rows: z.number().describe("Number of rows"),
-    cols: z.number().describe("Number of columns"),
+    rows: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .describe("Number of rows (1–1000; rows×cols must be ≤ 20000)"),
+    cols: z
+      .number()
+      .int()
+      .min(1)
+      .max(63)
+      .describe("Number of columns (1–63, Word's column limit; rows×cols must be ≤ 20000)"),
     data: z
       .array(z.array(z.string()))
       .optional()
@@ -1083,7 +1098,7 @@ server.tool(
             .string()
             .optional()
             .describe("Stable anchor of the paragraph to convert (use this OR paragraph_index)"),
-          level: z.number().min(1).max(9).describe("Heading level (1–9)"),
+          level: z.number().int().min(1).max(9).describe("Heading level (integer 1–9)"),
         }),
       )
       .describe("Array of heading assignments"),
@@ -1196,25 +1211,29 @@ server.tool(
       .describe("Page orientation"),
     width_mm: z
       .number()
+      .positive()
+      .max(558.8)
       .optional()
-      .describe("Custom page width in millimeters (overrides preset)"),
+      .describe("Custom page width in millimeters (overrides preset; 0–558.8, OOXML page limit)"),
     height_mm: z
       .number()
+      .positive()
+      .max(558.8)
       .optional()
-      .describe("Custom page height in millimeters (overrides preset)"),
+      .describe("Custom page height in millimeters (overrides preset; 0–558.8, OOXML page limit)"),
     margin_preset: z
       .string()
       .optional()
       .describe(
         "Margin preset: NORMAL, NARROW, WIDE, JP_COURT_25, JP_COURT_30_20",
       ),
-    top_mm: z.number().optional().describe("Top margin in mm"),
-    right_mm: z.number().optional().describe("Right margin in mm"),
-    bottom_mm: z.number().optional().describe("Bottom margin in mm"),
-    left_mm: z.number().optional().describe("Left margin in mm"),
-    header_mm: z.number().optional().describe("Header distance in mm"),
-    footer_mm: z.number().optional().describe("Footer distance in mm"),
-    gutter_mm: z.number().optional().describe("Gutter margin in mm"),
+    top_mm: z.number().min(0).max(558.8).optional().describe("Top margin in mm (0–558.8)"),
+    right_mm: z.number().min(0).max(558.8).optional().describe("Right margin in mm (0–558.8)"),
+    bottom_mm: z.number().min(0).max(558.8).optional().describe("Bottom margin in mm (0–558.8)"),
+    left_mm: z.number().min(0).max(558.8).optional().describe("Left margin in mm (0–558.8)"),
+    header_mm: z.number().min(0).max(558.8).optional().describe("Header distance in mm (0–558.8)"),
+    footer_mm: z.number().min(0).max(558.8).optional().describe("Footer distance in mm (0–558.8)"),
+    gutter_mm: z.number().min(0).max(558.8).optional().describe("Gutter margin in mm (0–558.8)"),
   },
   async ({
     file_path,
