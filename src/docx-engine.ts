@@ -2190,21 +2190,62 @@ function markParagraphRunsAsDeleted(pChildren: XNode[], ctx: RevisionContext): v
   }
 }
 
+/**
+ * Add a row-level tracked-deletion marker (`<w:trPr><w:del/>`) to a `<w:tr>`.
+ * This is what Word writes when whole rows are deleted with track-changes on:
+ * accept then removes the row entirely; reject strips the marker and keeps it.
+ */
+function markRowAsDeleted(trChildren: XNode[], ctx: RevisionContext): void {
+  let trPr = findOne(trChildren, "w:trPr");
+  if (!trPr) {
+    trPr = el("w:trPr");
+    trChildren.unshift(trPr); // w:trPr must be the first child of w:tr
+  }
+  const trPrChildren = trPr["w:trPr"] as XNode[];
+  // Avoid a duplicate marker if one is somehow already present.
+  if (!findOne(trPrChildren, "w:del")) {
+    trPrChildren.push(
+      el("w:del", [], {
+        "w:id": String(allocRevId(ctx)),
+        "w:author": ctx.author,
+        "w:date": ctx.date,
+      }),
+    );
+  }
+}
+
+/**
+ * Mark every row of a table (recursing into nested tables) as a tracked
+ * deletion: row-level `<w:trPr><w:del/>` so accept removes the rows/table and
+ * reject restores them, AND cell-paragraph runs converted to `<w:del>` so the
+ * content shows struck-through (Word's faithful representation). N8.
+ */
+function markTableAsDeleted(tblChildren: XNode[], ctx: RevisionContext): void {
+  const rows = findAll(tblChildren, "w:tr");
+  for (const row of rows) {
+    const trChildren = row["w:tr"] as XNode[];
+    markRowAsDeleted(trChildren, ctx);
+    const cells = findAll(trChildren, "w:tc");
+    for (const cell of cells) {
+      const tcChildren = cell["w:tc"] as XNode[];
+      for (const child of tcChildren) {
+        if (child["w:p"]) {
+          markParagraphRunsAsDeleted(child["w:p"] as XNode[], ctx);
+        } else if (child["w:tbl"]) {
+          // Recurse so a NESTED table is also fully marked (was skipped before).
+          markTableAsDeleted(child["w:tbl"] as XNode[], ctx);
+        }
+      }
+    }
+  }
+}
+
 /** Mark a body-level block element (paragraph or table) as tracked deletion. */
 function markBlockAsDeleted(element: XNode, ctx: RevisionContext): void {
   if (element["w:p"]) {
     markParagraphRunsAsDeleted(element["w:p"] as XNode[], ctx);
   } else if (element["w:tbl"]) {
-    const rows = findAll(element["w:tbl"], "w:tr");
-    for (const row of rows) {
-      const cells = findAll(row["w:tr"], "w:tc");
-      for (const cell of cells) {
-        const paras = findAll(cell["w:tc"], "w:p");
-        for (const p of paras) {
-          markParagraphRunsAsDeleted(p["w:p"] as XNode[], ctx);
-        }
-      }
-    }
+    markTableAsDeleted(element["w:tbl"] as XNode[], ctx);
   }
 }
 
@@ -2806,7 +2847,9 @@ export async function replyToComment(
     const now = new Date().toISOString();
     const replyParaId = generateParaId();
 
-    const lines = commentText.split("\n");
+    // Normalize CRLF / lone CR before splitting so no stray "\r" survives inside
+    // a reply <w:t> (N3 — parity with addComment / addComments).
+    const lines = normalizeNewlines(commentText).split("\n");
     const replyParas = lines.map((line, idx) => {
       const para = el("w:p", [
         el("w:r", [
@@ -2826,6 +2869,13 @@ export async function replyToComment(
       "w:date": now,
     });
     commentsChildren.push(replyEl);
+
+    // N1: a w14:paraId is now written into comment paragraphs (the parent's last
+    // <w:p> above and the reply's last <w:p>). The <w:comments> root must declare
+    // the w14 namespace, or the part is namespace-malformed ("w14 … not defined").
+    // Mirror the document.xml handling — ensure the binding on the comments root.
+    const commentsRoot = commentsParsed.find((n: XNode) => n["w:comments"]);
+    if (commentsRoot) ensureW14Namespace(commentsRoot);
 
     // Write comments.xml
     const commentsXml = builder.build(commentsParsed);

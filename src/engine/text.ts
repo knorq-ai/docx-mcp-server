@@ -1070,18 +1070,32 @@ function postProcessParagraphReject(pChildren: XNode[]): void {
   restoreRunPropertyChanges(pChildren);
 }
 
+/** True if a `<w:tr>`'s `<w:trPr>` carries a `<w:del>` row-deletion marker. */
+function rowHasTrackedDeletion(trChildren: XNode[]): boolean {
+  const trPr = findOne(trChildren, "w:trPr");
+  if (!trPr) return false;
+  return findOne(trPr["w:trPr"] as XNode[], "w:del") !== undefined;
+}
+
 /** Accept tracked changes within a table (properties, rows, cells, paragraphs). */
 function acceptChangesInTable(tblChildren: XNode[]): void {
   const tblPr = findOne(tblChildren, "w:tblPr");
   if (tblPr) stripChangeElement(tblPr["w:tblPr"] as XNode[], "w:tblPrChange");
-  const rows = findAll(tblChildren, "w:tr");
-  for (const row of rows) {
+  // Walk backward so removing a tracked-deleted row (N8) doesn't disturb indices.
+  for (let i = tblChildren.length - 1; i >= 0; i--) {
+    const row = tblChildren[i];
+    if (!row["w:tr"]) continue;
     const trChildren = row["w:tr"] as XNode[];
+    // A row marked for deletion (<w:trPr><w:del/>): accepting the deletion
+    // removes the entire row. No need to process its cells.
+    if (rowHasTrackedDeletion(trChildren)) {
+      tblChildren.splice(i, 1);
+      continue;
+    }
     const trPr = findOne(trChildren, "w:trPr");
     if (trPr) {
       stripChangeElement(trPr["w:trPr"] as XNode[], "w:trPrChange");
       stripChangeElement(trPr["w:trPr"] as XNode[], "w:ins");
-      stripChangeElement(trPr["w:trPr"] as XNode[], "w:del");
     }
     const cells = findAll(trChildren, "w:tc");
     for (const cell of cells) {
@@ -1121,6 +1135,34 @@ function rejectChangesInTable(tblChildren: XNode[]): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Recursively convert deleted text back to live text within an unwrapped
+ * w:del/w:moveFrom child (N6). For a `w:r` child, every `w:delText` becomes a
+ * `w:t`. For a wrapper such as `w:hyperlink` or `w:smartTag`, descend into its
+ * children and convert their runs in place — preserving the wrapper so a deleted
+ * hyperlink/smartTag is RESTORED (link + text), not silently dropped. Range
+ * markers and any other elements are left untouched (and still kept).
+ */
+function restoreDeletedRunText(node: XNode): void {
+  if (node["w:r"]) {
+    for (const rc of node["w:r"] as XNode[]) {
+      if (rc["w:delText"]) {
+        rc["w:t"] = rc["w:delText"];
+        delete rc["w:delText"];
+      }
+    }
+    return;
+  }
+  // Wrapper element (w:hyperlink, w:smartTag, w:ins nested in a w:del, …):
+  // descend into its child list and restore any runs inside it.
+  const tag = tagName(node);
+  if (tag && tag !== ":@" && Array.isArray(node[tag])) {
+    for (const child of node[tag] as XNode[]) {
+      restoreDeletedRunText(child);
+    }
+  }
+}
+
+/**
  * Accept all tracked changes: remove w:del/w:moveFrom elements entirely,
  * unwrap w:ins/w:moveTo so their children become normal content,
  * and strip all *Change revision properties.
@@ -1133,6 +1175,12 @@ export function acceptChangesInNodes(nodes: XNode[]): void {
     } else if (node["w:ins"] || node["w:moveTo"]) {
       const tag = node["w:ins"] !== undefined ? "w:ins" : "w:moveTo";
       const children = node[tag] as XNode[];
+      // N12: RE-PROCESS the unwrapped children before splicing them back in.
+      // Word writes <w:ins><w:del>…</w:del></w:ins> for "insert (tracked) then
+      // delete (tracked)"; a bare splice would leave the nested <w:del> live.
+      // Resolving the children first (accept removes nested w:del, unwraps any
+      // nested w:ins) means only fully-resolved content reaches the node list.
+      acceptChangesInNodes(children);
       nodes.splice(i, 1, ...children);
     } else if (isRangeMarker(node)) {
       nodes.splice(i, 1);
@@ -1142,6 +1190,12 @@ export function acceptChangesInNodes(nodes: XNode[]): void {
       postProcessParagraphAccept(pChildren);
     } else if (node["w:tbl"]) {
       acceptChangesInTable(node["w:tbl"]);
+      // N8: if accepting the row-deletions emptied the table (no <w:tr> left),
+      // remove the whole <w:tbl> — an empty table skeleton is invalid OOXML and
+      // not what "delete this table" intends.
+      if (findAll(node["w:tbl"] as XNode[], "w:tr").length === 0) {
+        nodes.splice(i, 1);
+      }
     } else if (node["w:sdt"]) {
       const sdtContent = findOne(node["w:sdt"] as XNode[], "w:sdtContent");
       if (sdtContent) acceptChangesInNodes(sdtContent["w:sdtContent"]);
@@ -1164,21 +1218,20 @@ export function rejectChangesInNodes(nodes: XNode[]): void {
     } else if (node["w:del"] || node["w:moveFrom"]) {
       const tag = node["w:del"] !== undefined ? "w:del" : "w:moveFrom";
       const delChildren = node[tag] as XNode[];
-      const runs: XNode[] = [];
+      // N6: preserve EVERY child wrapper (not only bare <w:r>). A deleted
+      // hyperlink/smartTag wraps the deleted run(s); dropping it would lose the
+      // restored link + text. Convert each child's w:delText→w:t recursively so
+      // the unwrapped content becomes live again.
+      const restored: XNode[] = [];
       for (const dc of delChildren) {
-        if (dc["w:r"]) {
-          const runC = dc["w:r"] as XNode[];
-          for (const rc of runC) {
-            if (rc["w:delText"]) {
-              const text = rc["w:delText"];
-              delete rc["w:delText"];
-              rc["w:t"] = text;
-            }
-          }
-          runs.push(dc);
-        }
+        restoreDeletedRunText(dc);
+        restored.push(dc);
       }
-      nodes.splice(i, 1, ...runs);
+      // N12 (symmetry): re-process the surviving children so any nested revision
+      // element resolves (e.g. a <w:ins> nested inside this <w:del> must be
+      // removed by reject, not left live).
+      rejectChangesInNodes(restored);
+      nodes.splice(i, 1, ...restored);
     } else if (isRangeMarker(node)) {
       nodes.splice(i, 1);
     } else if (node["w:p"] && isTrackedParagraphInsertion(node["w:p"] as XNode[])) {

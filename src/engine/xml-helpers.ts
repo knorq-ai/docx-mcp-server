@@ -97,7 +97,7 @@ export function setAttr(el: XNode, name: string, value: string): void {
   // attribute values (e.g. w:author, w:pStyle/@w:val, font names, colors). The
   // builder's processEntities still escapes markup chars (&,<,>,") on output, so
   // we only STRIP illegal chars here — never escape (that would double-encode).
-  el[":@"]["@_" + name] = typeof value === "string" ? sanitizeXmlText(value) : value;
+  el[":@"]["@_" + name] = typeof value === "string" ? sanitizeXmlAttr(value) : value;
 }
 
 export function findAll(nodes: XNode[], tag: string): XNode[] {
@@ -120,7 +120,7 @@ export function el(
     for (const [k, v] of Object.entries(attrs)) {
       // Same sanitization chokepoint as setAttr: strip XML-illegal chars from
       // string attribute values (do NOT escape — the builder does that).
-      node[":@"]["@_" + k] = typeof v === "string" ? sanitizeXmlText(v) : v;
+      node[":@"]["@_" + k] = typeof v === "string" ? sanitizeXmlAttr(v) : v;
     }
   }
   return node;
@@ -172,6 +172,25 @@ function stripLoneSurrogates(text: string): string {
  */
 export function sanitizeXmlText(text: string): string {
   return stripLoneSurrogates(text.replace(ILLEGAL_XML_CHARS, ""));
+}
+
+/**
+ * Sanitize a value destined for an XML ATTRIBUTE (not a text node). Beyond the
+ * illegal-char stripping of `sanitizeXmlText`, this collapses any run of
+ * XML-legal whitespace (`\r`, `\n`, `\t`) to a single space (N7).
+ *
+ * Why: `\r`/`\n`/`\t` are legal in attribute values, so `sanitizeXmlText` keeps
+ * them — but XML-1.0 §3.3.3 attribute-value normalization makes a conformant
+ * reader (Word / python-docx / lxml) replace each with a space on the way in.
+ * A reviewer name like "Eve\r\nMallory" stored raw in `w:author` would round-trip
+ * to "Eve  Mallory" (or worse, drift across tools). Collapsing here makes the
+ * recorded value stable and identical to what every reader will observe. This is
+ * applied ONLY at the attribute chokepoints (`setAttr`/`el`); the TEXT-node path
+ * (`textNode`) is untouched, so newlines inside run text are preserved/handled by
+ * the edit pipeline as before.
+ */
+export function sanitizeXmlAttr(value: string): string {
+  return sanitizeXmlText(value).replace(/[\r\n\t]+/g, " ");
 }
 
 /**

@@ -49,11 +49,14 @@ import {
   getDocumentInfoStructured,
   ensureAnchors,
   ensureAnchorsStructured,
+  acceptAllChanges,
   rejectAllChanges,
   listImages,
   readComments,
   addComment,
   addComments,
+  replyToComment,
+  deleteParagraphs,
   EngineError,
   ErrorCode,
   formatText,
@@ -2089,5 +2092,378 @@ describe("N4: editParagraphs preserves footnote/endnote refs and field codes", (
     expect(countMatches(after, /<w:fldSimple\b/g)).toBe(1);
     expect(after).toContain("Page X of Y");
     expect(xmlIsWellFormed(pth)).toBe(true);
+  });
+});
+
+// =========================================================================
+// ROUND-4 QA FINDINGS (N1, N3, N7, N6, N12, N8) — comments + track-changes
+// =========================================================================
+
+/** Count raw CR (0x0D) bytes in a string. */
+function countRawCR(s: string): number {
+  return (s.match(/\r/g) ?? []).length;
+}
+
+/** Extract the comment id from an addComment/replyToComment result string. */
+function commentIdFromResult(msg: string): number {
+  const m = msg.match(/ID:\s*(\d+)/);
+  if (!m) throw new Error(`no comment ID in result: ${msg}`);
+  return parseInt(m[1], 10);
+}
+
+// -------------------------------------------------------------------------
+// N1 [CRITICAL] — replyToComment writes w14:paraId into comments.xml; the
+// <w:comments> root must declare xmlns:w14 (+ mc:Ignorable) or the part is
+// namespace-malformed ("Namespace prefix w14 for paraId on p is not defined").
+// -------------------------------------------------------------------------
+describe("N1: replyToComment declares the w14 namespace on the comments root", () => {
+  it("comments.xml <w:comments> root declares xmlns:w14 and parses under a strict NS-aware parser", async () => {
+    const p = await createTmpDoc("Please review this sentence carefully.");
+    const addMsg = await addComment(p, "review this sentence", "Original note", "Alice");
+    const parentId = commentIdFromResult(addMsg);
+    await replyToComment(p, parentId, "A reply", "Bob");
+
+    const cxml = await readRawCommentsXml(p);
+    // A w14:paraId is being written into the comment paragraphs.
+    expect(cxml).toContain("w14:paraId");
+    // The root must declare the w14 prefix.
+    const rootMatch = cxml.match(/<w:comments\b[^>]*>/);
+    expect(rootMatch).not.toBeNull();
+    expect(rootMatch![0]).toContain("xmlns:w14=");
+
+    // Strict NS-aware validators must accept the part (no "w14 ... not defined").
+    expectCommentsXmlWellFormed(p);
+    expect(pythonDocxOpens(p)).toBe(true);
+    expect(xmlIsWellFormed(p)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// N3 [HIGH] — replyToComment must normalizeNewlines before split("\n") so no
+// raw CR (0x0D) survives in the reply body <w:t> (parity with addComment).
+// -------------------------------------------------------------------------
+describe("N3: replyToComment normalizes newlines (no raw CR in reply body)", () => {
+  it("a reply with CRLF and a lone CR carries zero raw 0x0D in its body", async () => {
+    const p = await createTmpDoc("Anchor text for the reply test here.");
+    const addMsg = await addComment(p, "Anchor text", "Parent", "Alice");
+    const parentId = commentIdFromResult(addMsg);
+    await replyToComment(p, parentId, "line one\r\nline two\rline three", "Bob");
+
+    const cxml = await readRawCommentsXml(p);
+    // Zero raw CR anywhere in comments.xml (the reply body is the only source).
+    expect(countRawCR(cxml)).toBe(0);
+    // The three logical lines became three <w:t> runs in the reply.
+    expect(cxml).toContain("line one");
+    expect(cxml).toContain("line two");
+    expect(cxml).toContain("line three");
+    expectCommentsXmlWellFormed(p);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("addComment (baseline) also leaves zero raw CR for the same input", async () => {
+    const p = await createTmpDoc("Anchor here for baseline.");
+    await addComment(p, "Anchor here", "a\r\nb\rc", "Alice");
+    const cxml = await readRawCommentsXml(p);
+    expect(countRawCR(cxml)).toBe(0);
+  });
+});
+
+// -------------------------------------------------------------------------
+// N7 [MEDIUM] — user-supplied author names in ATTRIBUTE values must not carry
+// a raw CR (0x0D). setAttr/el sanitize illegal control chars but keep \r (it
+// is XML-legal); a conformant reader's attribute-value normalization then
+// collapses it, destabilizing the recorded reviewer name. Collapse \r/\n/\t
+// runs to a single space in attribute values only.
+// -------------------------------------------------------------------------
+describe("N7: CR/LF/Tab in attribute values are collapsed (no raw 0x0D in attrs)", () => {
+  it("tracked replaceTexts author 'Eve\\r\\nMallory' → w:author has no raw CR (becomes 'Eve Mallory')", async () => {
+    const p = await createTmpDoc("Replace the target word here.");
+    await replaceTexts(
+      p,
+      [{ search: "target", replace: "replacement" }],
+      true,
+      "Eve\r\nMallory",
+    );
+    const xml = await readRawDocXml(p);
+    expect(countRawCR(xml)).toBe(0);
+    // The CRLF collapsed to a single space.
+    expect(xml).toContain('w:author="Eve Mallory"');
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("addComment author 'Carol\\r\\nNewline' → comments.xml w:author has no raw CR", async () => {
+    const p = await createTmpDoc("A clear anchor sentence for comments.");
+    await addComment(p, "clear anchor", "note", "Carol\r\nNewline");
+    const cxml = await readRawCommentsXml(p);
+    expect(countRawCR(cxml)).toBe(0);
+    expect(cxml).toContain('w:author="Carol Newline"');
+    expectCommentsXmlWellFormed(p);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("run TEXT (not an attribute) still keeps newlines unaffected by the attr collapse", async () => {
+    // A newline in author (attribute) collapses; a newline in body text uses a
+    // different path (multiline → separate <w:p>), so this is just a guard that
+    // ordinary authors still round-trip.
+    const p = await createTmpDoc("Plain author guard.");
+    await replaceTexts(p, [{ search: "Plain", replace: "Simple" }], true, "Claude");
+    const xml = await readRawDocXml(p);
+    expect(xml).toContain('w:author="Claude"');
+  });
+});
+
+// -------------------------------------------------------------------------
+// N6 [HIGH, data-loss] — rejectAllChanges must RESTORE a deleted hyperlink /
+// smartTag (and its text), not drop it. The w:del unwrap only re-emitted bare
+// <w:r> children, silently dropping a <w:hyperlink> wrapper.
+// -------------------------------------------------------------------------
+describe("N6: rejectAllChanges restores a deleted hyperlink/smartTag", () => {
+  /** Build a doc with a tracked-deleted hyperlink between two plain runs. */
+  async function makeDocWithDeletedHyperlink(): Promise<string> {
+    const pth = tmpDocxPath();
+    trackTmpFile(pth);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:r><w:t xml:space="preserve">See the </w:t></w:r>
+  <w:del w:id="70" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:hyperlink r:id="rId99">
+      <w:r><w:delText xml:space="preserve">company website</w:delText></w:r>
+    </w:hyperlink>
+  </w:del>
+  <w:r><w:t xml:space="preserve"> for details.</w:t></w:r>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(pth, documentXml);
+    return pth;
+  }
+
+  it("rejecting restores the <w:hyperlink> + its text (delText→w:t)", async () => {
+    const p = await makeDocWithDeletedHyperlink();
+    await rejectAllChanges(p);
+    const xml = await readRawDocXml(p);
+    // The hyperlink wrapper is restored.
+    expect(xml).toContain("<w:hyperlink");
+    // Its text survived and is now live (w:t, not w:delText).
+    expect(xml).toContain("company website");
+    expect(xml).not.toContain("w:delText");
+    expect(xml).not.toContain("<w:del ");
+    // Full sentence text is intact (python-docx reads runs concatenated).
+    if (HAS_PYDOCX) {
+      const txt = runPython(
+        `import docx; d=docx.Document(${JSON.stringify(p)}); print(d.paragraphs[0].text)`,
+      ).trim();
+      expect(txt).toBe("See the company website for details.");
+    } else {
+      const inner = xml.replace(/<[^>]+>/g, "");
+      expect(inner).toContain("See the company website for details.");
+    }
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("a w:del with mixed children (w:r + w:hyperlink + w:r) restores ALL three", async () => {
+    const pth = tmpDocxPath();
+    trackTmpFile(pth);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p>
+  <w:del w:id="80" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:r><w:delText xml:space="preserve">alpha </w:delText></w:r>
+    <w:hyperlink r:id="rId99"><w:r><w:delText xml:space="preserve">beta</w:delText></w:r></w:hyperlink>
+    <w:r><w:delText xml:space="preserve"> gamma</w:delText></w:r>
+  </w:del>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(pth, documentXml);
+    await rejectAllChanges(pth);
+    const xml = await readRawDocXml(pth);
+    expect(xml).toContain("alpha ");
+    expect(xml).toContain("beta");
+    expect(xml).toContain(" gamma");
+    expect(xml).toContain("<w:hyperlink");
+    expect(xml).not.toContain("w:delText");
+    if (HAS_PYDOCX) {
+      const txt = runPython(
+        `import docx; d=docx.Document(${JSON.stringify(pth)}); print(d.paragraphs[0].text)`,
+      ).trim();
+      expect(txt).toBe("alpha beta gamma");
+    }
+    expect(xmlIsWellFormed(pth)).toBe(true);
+    expect(pythonDocxOpens(pth)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// N12 [MEDIUM, round-trip] — acceptAllChanges must resolve a nested <w:del>
+// inside an accepted <w:ins>. Word writes <w:ins><w:del>…</w:del></w:ins> for
+// "insert (tracked) then delete (tracked)". After accept-all, no live w:del /
+// w:delText may remain.
+// -------------------------------------------------------------------------
+describe("N12: acceptAllChanges resolves a nested w:del inside an accepted w:ins", () => {
+  it("nested ins>del leaves zero del/ins residue; net text drops the deleted run", async () => {
+    const pth = tmpDocxPath();
+    trackTmpFile(pth);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:p>
+  <w:r><w:t xml:space="preserve">KEEP </w:t></w:r>
+  <w:ins w:id="90" w:author="User" w:date="2024-01-01T00:00:00Z">
+    <w:del w:id="91" w:author="User" w:date="2024-01-01T00:00:00Z">
+      <w:r><w:delText xml:space="preserve">INSERTED-THEN-DELETED</w:delText></w:r>
+    </w:del>
+  </w:ins>
+  <w:r><w:t xml:space="preserve"> END</w:t></w:r>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(pth, documentXml);
+    await acceptAllChanges(pth);
+    const xml = await readRawDocXml(pth);
+    // No revision residue at all.
+    expect(xml).not.toContain("<w:del");
+    expect(xml).not.toContain("w:delText");
+    expect(xml).not.toContain("<w:ins");
+    // The inserted-then-deleted run is gone.
+    expect(xml).not.toContain("INSERTED-THEN-DELETED");
+    if (HAS_PYDOCX) {
+      const txt = runPython(
+        `import docx; d=docx.Document(${JSON.stringify(pth)}); print(repr(d.paragraphs[0].text))`,
+      ).trim();
+      expect(txt).toBe("'KEEP  END'");
+    }
+    expect(xmlIsWellFormed(pth)).toBe(true);
+    expect(pythonDocxOpens(pth)).toBe(true);
+  });
+
+  it("a normal single tracked insert still accepts cleanly", async () => {
+    const pth = tmpDocxPath();
+    trackTmpFile(pth);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:p>
+  <w:r><w:t xml:space="preserve">A </w:t></w:r>
+  <w:ins w:id="92" w:author="User" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">B</w:t></w:r></w:ins>
+  <w:r><w:t xml:space="preserve"> C</w:t></w:r>
+</w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(pth, documentXml);
+    await acceptAllChanges(pth);
+    const xml = await readRawDocXml(pth);
+    expect(xml).not.toContain("<w:ins");
+    expect(xml).toContain("B");
+    if (HAS_PYDOCX) {
+      const txt = runPython(
+        `import docx; d=docx.Document(${JSON.stringify(pth)}); print(d.paragraphs[0].text)`,
+      ).trim();
+      expect(txt).toBe("A B C");
+    }
+    expect(pythonDocxOpens(pth)).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------------
+// N8 [MEDIUM] — tracked delete of a whole table block. markBlockAsDeleted only
+// marked direct-cell paragraph runs (no row-level <w:trPr><w:del/>, no recursion
+// into nested tables), so accept left an empty skeleton + intact nested table.
+// -------------------------------------------------------------------------
+describe("N8: tracked delete of a whole table block", () => {
+  /** A body with one table (containing a nested table) plus a trailing para. */
+  async function makeDocWithTableAndNested(): Promise<string> {
+    const pth = tmpDocxPath();
+    trackTmpFile(pth);
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:tbl>
+  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+  <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+  <w:tr>
+    <w:tc>
+      <w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>
+      <w:p><w:r><w:t>OUTER CELL</w:t></w:r></w:p>
+      <w:tbl>
+        <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+        <w:tblGrid><w:gridCol w:w="2500"/></w:tblGrid>
+        <w:tr>
+          <w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t>NESTED CONTENT</w:t></w:r></w:p></w:tc>
+        </w:tr>
+      </w:tbl>
+    </w:tc>
+  </w:tr>
+</w:tbl>
+<w:p><w:r><w:t>trailing</w:t></w:r></w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body>
+</w:document>`;
+    await writeMinimalDocx(pth, documentXml);
+    return pth;
+  }
+
+  /** python-docx (or raw) count of TOP-LEVEL tables in the body. */
+  async function topLevelTableCount(filePath: string): Promise<number> {
+    if (HAS_PYDOCX) {
+      const out = runPython(
+        `import docx; d=docx.Document(${JSON.stringify(filePath)}); print(len(d.tables))`,
+      ).trim();
+      return parseInt(out, 10);
+    }
+    const body = await rawBodyChildren(filePath);
+    return body.filter((n) => rawTag(n) === "w:tbl").length;
+  }
+
+  it("tracked delete then ACCEPT removes the table entirely (table + nested gone)", async () => {
+    const p = await makeDocWithTableAndNested();
+    // The table is block index 0 in the unified block space.
+    await deleteParagraphs(p, [0], true, "User");
+    // Now accept: the table (and its nested table) must be fully removed.
+    await acceptAllChanges(p);
+    const xml = await readRawDocXml(p);
+    expect(await topLevelTableCount(p)).toBe(0);
+    expect(xml).not.toContain("<w:tbl");
+    expect(xml).not.toContain("NESTED CONTENT");
+    expect(xml).not.toContain("OUTER CELL");
+    // Trailing paragraph survives.
+    expect(xml).toContain("trailing");
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("tracked delete then REJECT restores the table + nested content", async () => {
+    const p = await makeDocWithTableAndNested();
+    await deleteParagraphs(p, [0], true, "User");
+    await rejectAllChanges(p);
+    const xml = await readRawDocXml(p);
+    expect(await topLevelTableCount(p)).toBe(1);
+    expect(xml).toContain("OUTER CELL");
+    expect(xml).toContain("NESTED CONTENT");
+    // No leftover tracked-delete markers.
+    expect(xml).not.toContain("w:delText");
+    expect(xmlIsWellFormed(p)).toBe(true);
+    expect(pythonDocxOpens(p)).toBe(true);
+  });
+
+  it("untracked delete of the same table still removes it", async () => {
+    const p = await makeDocWithTableAndNested();
+    await deleteParagraphs(p, [0], false, "User");
+    const xml = await readRawDocXml(p);
+    expect(await topLevelTableCount(p)).toBe(0);
+    expect(xml).not.toContain("<w:tbl");
+    expect(xml).toContain("trailing");
+    expect(pythonDocxOpens(p)).toBe(true);
   });
 });
