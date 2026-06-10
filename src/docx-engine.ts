@@ -56,6 +56,8 @@ import {
   getParagraphStyle,
   getHeadingLevel,
   enumerateBlocks,
+  extractSdtBlockText,
+  countTextMetrics,
   replaceInParagraph,
   replaceInParagraphTracked,
   paragraphHasRevisions,
@@ -92,7 +94,6 @@ import {
   parseCommentsExtendedXml,
   getCommentsExtendedArray,
   ensureCommentsExtendedInfrastructure,
-  generateParaId,
   findAnchorParagraph,
   insertCommentRangeMarkers,
 } from "./engine/comments.js";
@@ -115,6 +116,7 @@ import {
 import {
   type ParagraphLocation,
   collectAllParaIds,
+  generateDocParaId,
   getDocumentRoot,
   ensureW14Namespace,
   directBodyParagraphLocations,
@@ -252,7 +254,8 @@ function locatorToLocation(
   const bodyIndex = bodyIdxs[idx];
   const element = body[bodyIndex];
   if (!element["w:p"]) {
-    throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${idx} is not a paragraph (it may be a table).`);
+    const kind = element["w:sdt"] ? "a content control (w:sdt)" : "a table";
+    throw new EngineError(ErrorCode.NOT_A_PARAGRAPH, `Block ${idx} is not a paragraph (it is ${kind}).`);
   }
   return { element, parent: body, bodyIndex, blockIndex: idx };
 }
@@ -288,7 +291,7 @@ class AnchorSeeder {
 
 export interface AnchorBlockInfo {
   index: number;
-  type: "paragraph" | "table";
+  type: "paragraph" | "table" | "sdt";
   anchor: string | null;
   textPreview: string;
 }
@@ -366,12 +369,20 @@ export async function ensureAnchorsStructured(filePath: string): Promise<EnsureA
           anchor: attr(el2, "w14:paraId") ?? null,
           textPreview: anchorPreview(extractParagraphText(el2["w:p"] as XNode[], false)),
         });
-      } else {
+      } else if (el2["w:tbl"]) {
         blocks.push({
           index,
           type: "table",
           anchor: null,
           textPreview: anchorPreview(extractTableText(el2["w:tbl"] as XNode[], false)),
+        });
+      } else {
+        // Content control (w:sdt): one opaque, non-anchorable block.
+        blocks.push({
+          index,
+          type: "sdt",
+          anchor: null,
+          textPreview: anchorPreview(extractSdtBlockText(el2["w:sdt"] as XNode[], false)),
         });
       }
     });
@@ -459,17 +470,19 @@ export async function getDocumentInfo(filePath: string): Promise<string> {
 
   let output = `Document: ${info.file}\n`;
   output += `Path: ${info.path}\n`;
-  output += `Total blocks: ${info.totalBlocks}\n`;
+  output += `Total blocks: ${info.totalBlocks} (last block index: ${info.lastBlockIndex})\n`;
   output += `  Headings: ${info.headings}\n`;
   output += `  Paragraphs: ${info.paragraphs}\n`;
   output += `  Tables: ${info.tables}\n`;
   output += `  Has comments: ${info.hasComments}\n`;
+  output += `Words: ${info.wordCount}, Characters: ${info.charCount} (${info.charCountNoSpaces} without spaces)\n`;
+  output += `Append: ${info.appendHint}\n`;
 
   if (info.outline.length > 0) {
-    output += "\nDocument outline:\n";
+    output += "\nDocument outline (section spans [start–end] block):\n";
     for (const h of info.outline) {
       const indent = "  ".repeat(h.level - 1);
-      output += `${indent}H${h.level}: ${h.text} [block ${h.blockIndex}]\n`;
+      output += `${indent}H${h.level}: ${h.text} [blocks ${h.blockIndex}–${h.endBlock}]\n`;
     }
   }
 
@@ -486,11 +499,31 @@ export interface DocumentInfoResult {
   file: string;
   path: string;
   totalBlocks: number;
+  /** 末尾ブロックのインデックス（= totalBlocks - 1、空文書なら -1）。 */
+  lastBlockIndex: number;
   headings: number;
   paragraphs: number;
   tables: number;
+  /** 本文全体の語数（CJK は 1 文字 = 1 語、欧文は英数字の連なりを 1 語）。 */
+  wordCount: number;
+  /** 本文全体の文字数（空白込み）。 */
+  charCount: number;
+  /** 本文全体の文字数（空白を除く）。 */
+  charCountNoSpaces: number;
   hasComments: boolean;
-  outline: { level: number; text: string; blockIndex: number }[];
+  /** 末尾追加の方法を示すヒント文字列。 */
+  appendHint: string;
+  outline: {
+    level: number;
+    text: string;
+    /** 見出し段落自身のブロックインデックス（節の開始）。 */
+    blockIndex: number;
+    /**
+     * この節の最終ブロックインデックス（節の範囲は [blockIndex, endBlock] 包含）。
+     * 同レベル以上の次の見出し直前まで、無ければ文書末尾まで。
+     */
+    endBlock: number;
+  }[];
 }
 
 /**
@@ -516,20 +549,54 @@ export async function getDocumentInfoStructured(
     ?.async("string");
   const hasComments = !!commentsXml && commentsXml.includes("w:comment");
 
-  const outline = headingBlocks.map((h) => ({
-    level: h.headingLevel!,
-    text: h.text.substring(0, 100) + (h.text.length > 100 ? "..." : ""),
-    blockIndex: h.index,
-  }));
+  // 各見出しの節範囲: 同レベル以上の次の見出し直前まで（無ければ文書末尾まで）。
+  const lastBlockIndex = blocks.length - 1;
+  const outline = headingBlocks.map((h, i) => {
+    let endBlock = lastBlockIndex;
+    for (let j = i + 1; j < headingBlocks.length; j++) {
+      if (headingBlocks[j].headingLevel! <= h.headingLevel!) {
+        endBlock = headingBlocks[j].index - 1;
+        break;
+      }
+    }
+    return {
+      level: h.headingLevel!,
+      text: h.text.substring(0, 100) + (h.text.length > 100 ? "..." : ""),
+      blockIndex: h.index,
+      endBlock,
+    };
+  });
+
+  // 語数・文字数は全ブロック（テーブル含む）のテキストをブロックごとに数えて
+  // 合算する。ブロック区切りの文字を charCount に混入させないため join しない。
+  let wordCount = 0;
+  let charCount = 0;
+  let charCountNoSpaces = 0;
+  for (const b of blocks) {
+    const m = countTextMetrics(b.text);
+    wordCount += m.words;
+    charCount += m.chars;
+    charCountNoSpaces += m.charsNoSpaces;
+  }
+
+  const appendHint =
+    blocks.length === 0
+      ? "Document is empty; insert with position: 0 or -1."
+      : `To append at the very end, use insert_paragraphs with position: -1 (or position: ${blocks.length}). The last existing block index is ${lastBlockIndex}.`;
 
   return {
     file: path.basename(filePath),
     path: filePath,
     totalBlocks: blocks.length,
+    lastBlockIndex,
     headings: headingBlocks.length,
     paragraphs: paragraphs.length,
     tables: tables.length,
+    wordCount,
+    charCount,
+    charCountNoSpaces,
     hasComments,
+    appendHint,
     outline,
   };
 }
@@ -583,10 +650,11 @@ export interface SearchMatch {
 }
 
 /**
- * Map enumerateBlocks() block index → anchor, mirroring its walk (paragraph and
- * table each advance the index; SDT-contained paragraphs advance it but are not
- * anchorable in v1). Only direct-body paragraphs that already have a paraId are
- * recorded, so a match's anchor is correct or absent — never mismatched.
+ * Map enumerateBlocks() block index → anchor, mirroring its walk (paragraph,
+ * table and content-control each advance the index by one; tables and content
+ * controls are not anchorable). Only direct-body paragraphs that already have a
+ * paraId are recorded, so a match's anchor is correct or absent — never
+ * mismatched.
  */
 function buildAnchorByBlockIndex(body: XNode[]): Map<number, string> {
   const map = new Map<number, string>();
@@ -596,15 +664,10 @@ function buildAnchorByBlockIndex(body: XNode[]): Map<number, string> {
       const a = attr(node, "w14:paraId");
       if (a) map.set(idx, a);
       idx++;
-    } else if (node["w:tbl"]) {
+    } else if (node["w:tbl"] || node["w:sdt"]) {
+      // Table and content-control blocks each advance the index by one (sdt
+      // content is one opaque block, not anchorable).
       idx++;
-    } else if (node["w:sdt"]) {
-      const content = findOne(node["w:sdt"] as XNode[], "w:sdtContent");
-      if (content) {
-        for (const cc of content["w:sdtContent"] as XNode[]) {
-          if (cc["w:p"]) idx++;
-        }
-      }
     }
   }
   return map;
@@ -715,15 +778,21 @@ export async function searchTextStructured(
       });
       idx++;
     } else if (child["w:sdt"]) {
-      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
-      if (sdtContent) {
-        for (const contentChild of sdtContent["w:sdtContent"] as XNode[]) {
-          if (contentChild["w:p"]) {
-            tryMatchParagraph(idx, contentChild["w:p"] as XNode[]);
-            idx++;
-          }
-        }
+      // One opaque block: search the content control's combined text and report
+      // a single blockIndex (no anchor — sdt content isn't anchorable).
+      const text = extractSdtBlockText(child["w:sdt"] as XNode[], false);
+      const compare = caseSensitive ? text : text.toLowerCase();
+      const m = buildTextMatch(text, compare, searchStr, query.length);
+      if (m) {
+        totalMatches += m.occurrences;
+        matches.push({
+          blockIndex: idx,
+          occurrences: m.occurrences,
+          context: m.context,
+          fullText: text,
+        });
       }
+      idx++;
     }
   }
 
@@ -741,7 +810,7 @@ export async function searchTextStructured(
 
 /** Resolve a table block to its <w:tbl> children, validating index and type. */
 function getTableChildren(body: XNode[], bodyIdxs: number[], blockIndex: number): XNode[] {
-  if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
+  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
   }
   const element = body[bodyIdxs[blockIndex]];
@@ -2069,7 +2138,14 @@ export async function deleteParagraphs(
       if (!Number.isInteger(idx) || idx < 0 || idx >= bodyIdxs.length) {
         throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Paragraph index ${idx} out of range (0–${bodyIdxs.length - 1}).`);
       }
-      targets.add(body[bodyIdxs[idx]]);
+      const element = body[bodyIdxs[idx]];
+      if (element["w:sdt"]) {
+        throw new EngineError(
+          ErrorCode.NOT_A_PARAGRAPH,
+          `Block ${idx} is a content control (w:sdt); deleting content controls is not supported.`,
+        );
+      }
+      targets.add(element);
     }
     for (const anchor of anchors) {
       targets.add(resolveAnchor(anchorIndex, anchor).element);
@@ -2145,6 +2221,21 @@ export async function formatText(
         forEachParagraphInTable(child["w:tbl"], (pChildren) => {
           totalFormatted += formatInParagraph(pChildren, search, formatting, caseSensitive);
         });
+      } else if (child["w:sdt"]) {
+        // Global text op — also format text inside content controls (mirrors
+        // replace_texts, which recurses into w:sdt).
+        const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+        if (sdtContent) {
+          for (const cc of sdtContent["w:sdtContent"] as XNode[]) {
+            if (cc["w:p"]) {
+              totalFormatted += formatInParagraph(cc["w:p"], search, formatting, caseSensitive);
+            } else if (cc["w:tbl"]) {
+              forEachParagraphInTable(cc["w:tbl"], (pChildren) => {
+                totalFormatted += formatInParagraph(pChildren, search, formatting, caseSensitive);
+              });
+            }
+          }
+        }
       }
     }
 
@@ -2597,17 +2688,27 @@ export async function replyToComment(
     if (parentParas.length === 0) {
       throw new EngineError(ErrorCode.INVALID_PARAMETER, `Parent comment ${parentCommentId} has no paragraphs.`);
     }
+    // Allocate paraIds from a used-set of the comment part's existing ids so
+    // every generated id is MS-DOCX-valid (nonzero, < 0x80000000) and unique.
+    const usedParaIds = new Set<string>();
+    for (const c of findAll(commentsChildren, "w:comment")) {
+      for (const para of findAll(c["w:comment"] as XNode[], "w:p")) {
+        const id = attr(para, "w14:paraId");
+        if (id) usedParaIds.add(id);
+      }
+    }
+
     const parentLastPara = parentParas[parentParas.length - 1];
     let parentParaId = attr(parentLastPara, "w14:paraId") ?? "";
     if (!parentParaId) {
-      parentParaId = generateParaId();
+      parentParaId = generateDocParaId(usedParaIds);
       setAttr(parentLastPara, "w14:paraId", parentParaId);
     }
 
     // Create reply comment
     const replyId = getNextCommentId(commentsChildren);
     const now = new Date().toISOString();
-    const replyParaId = generateParaId();
+    const replyParaId = generateDocParaId(usedParaIds);
 
     const lines = commentText.split("\n");
     const replyParas = lines.map((line, idx) => {
@@ -2768,18 +2869,32 @@ export async function deleteComment(
       }
     }
 
+    const removeFromTable = (tblChildren: XNode[]): void => {
+      const rows = findAll(tblChildren, "w:tr");
+      for (const row of rows) {
+        const cells = findAll(row["w:tr"], "w:tc");
+        for (const cell of cells) {
+          const paras = findAll(cell["w:tc"], "w:p");
+          for (const p of paras) {
+            removeCommentMarkers(p["w:p"]);
+          }
+        }
+      }
+    };
+
     for (const child of body) {
       if (child["w:p"]) {
         removeCommentMarkers(child["w:p"]);
       } else if (child["w:tbl"]) {
-        const rows = findAll(child["w:tbl"], "w:tr");
-        for (const row of rows) {
-          const cells = findAll(row["w:tr"], "w:tc");
-          for (const cell of cells) {
-            const paras = findAll(cell["w:tc"], "w:p");
-            for (const p of paras) {
-              removeCommentMarkers(p["w:p"]);
-            }
+        removeFromTable(child["w:tbl"]);
+      } else if (child["w:sdt"]) {
+        // Also strip markers inside content controls, else a comment that spans
+        // into an sdt leaves dangling commentRange/commentReference markup.
+        const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
+        if (sdtContent) {
+          for (const cc of sdtContent["w:sdtContent"] as XNode[]) {
+            if (cc["w:p"]) removeCommentMarkers(cc["w:p"]);
+            else if (cc["w:tbl"]) removeFromTable(cc["w:tbl"]);
           }
         }
       }
@@ -3518,7 +3633,7 @@ function getTableCellParagraph(
   rowIndex: number,
   colIndex: number,
 ): { paraEl: XNode; cellChildren: XNode[] } {
-  if (blockIndex < 0 || blockIndex >= bodyIdxs.length) {
+  if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= bodyIdxs.length) {
     throw new EngineError(ErrorCode.INDEX_OUT_OF_RANGE, `Block index ${blockIndex} out of range (0–${bodyIdxs.length - 1}).`);
   }
 

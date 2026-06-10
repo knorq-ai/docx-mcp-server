@@ -104,11 +104,17 @@ export function getBody(parsed: XNode[]): XNode[] {
   return bodyEl["w:body"];
 }
 
-/** Returns the indices into the body array for content blocks (paragraphs + tables) */
+/**
+ * Returns the indices into the body array for content blocks: top-level
+ * paragraphs (`w:p`), tables (`w:tbl`) and content controls (`w:sdt`). Each
+ * counts as exactly one block, matching enumerateBlocks()/search_text so a
+ * block index from a read tool resolves to the same block in an edit tool.
+ * A `w:sdt` block is not a paragraph, so paragraph/table edits reject it.
+ */
 export function blockBodyIndices(body: XNode[]): number[] {
   const indices: number[] = [];
   for (let i = 0; i < body.length; i++) {
-    if (body[i]["w:p"] || body[i]["w:tbl"]) {
+    if (body[i]["w:p"] || body[i]["w:tbl"] || body[i]["w:sdt"]) {
       indices.push(i);
     }
   }

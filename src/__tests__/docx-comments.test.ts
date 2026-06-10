@@ -367,6 +367,28 @@ describe("replyToComment", () => {
     ).rejects.toMatchObject({ code: "INVALID_PARAMETER" });
   });
 
+  it("generates MS-DOCX-valid w14:paraId for every reply paragraph", async () => {
+    const p = await createTmpDoc("Paraid validity content");
+    await addComment(p, "validity content", "Parent", "Alice");
+    // Several replies → exercise the generator many times.
+    for (let i = 0; i < 12; i++) {
+      await replyToComment(p, 0, `Reply ${i}`, "Bob");
+    }
+    const commentsXml = await readRawCommentsXml(p);
+    const ids = [...commentsXml.matchAll(/w14:paraId="([0-9A-Fa-f]{8})"/g)].map(
+      (m) => m[1],
+    );
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      const n = parseInt(id, 16);
+      // MS-DOCX requires nonzero and < 0x80000000.
+      expect(n).toBeGreaterThan(0);
+      expect(n).toBeLessThan(0x80000000);
+    }
+    // Part-wide uniqueness within the comments part.
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it("supports reply chains (reply to a reply)", async () => {
     const p = await createTmpDoc("Chain test content");
     await addComment(p, "test content", "Root comment", "Alice");

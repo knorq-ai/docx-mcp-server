@@ -8,10 +8,12 @@ import {
 import {
   readDocument,
   getDocumentInfo,
+  getDocumentInfoStructured,
   searchText,
   createDocument,
   replaceTexts,
   insertTable,
+  setHeadings,
   addComment,
   listImages,
   listImagesStructured,
@@ -102,7 +104,7 @@ describe("getDocumentInfo", () => {
     const result = await getDocumentInfo(p);
     expect(result).toContain("Headings: 1");
     expect(result).toContain("H1: My Heading");
-    expect(result).toContain("Document outline:");
+    expect(result).toContain("Document outline");
   });
 
   it("counts tables", async () => {
@@ -110,6 +112,104 @@ describe("getDocumentInfo", () => {
     await insertTable(p, -1, 2, 3);
     const result = await getDocumentInfo(p);
     expect(result).toContain("Tables: 1");
+  });
+
+  it("reports last block index and an append hint", async () => {
+    const p = await createTmpDoc("One\nTwo\nThree");
+    const info = await getDocumentInfoStructured(p);
+    expect(info.totalBlocks).toBe(3);
+    expect(info.lastBlockIndex).toBe(2);
+    expect(info.appendHint).toContain("position: -1");
+    expect(info.appendHint).toContain("3");
+  });
+
+  it("reports an empty-document append hint", async () => {
+    const p = await createTmpDoc();
+    const info = await getDocumentInfoStructured(p);
+    expect(info.lastBlockIndex).toBe(info.totalBlocks - 1);
+    expect(info.appendHint.toLowerCase()).toContain("position");
+  });
+
+  it("counts words and characters (latin, exact)", async () => {
+    const p = await createTmpDoc("the quick brown fox");
+    const info = await getDocumentInfoStructured(p);
+    expect(info.wordCount).toBe(4);
+    expect(info.charCount).toBe(19); // includes the 3 spaces
+    expect(info.charCountNoSpaces).toBe(16);
+  });
+
+  it("does not inflate charCount across multiple blocks", async () => {
+    // 3 paragraphs, 5 chars each, no spaces. charCount must be exactly 15 —
+    // an earlier implementation joined blocks with '\n' and reported 17.
+    const p = await createTmpDoc("aaaaa\nbbbbb\nccccc");
+    const info = await getDocumentInfoStructured(p);
+    expect(info.totalBlocks).toBe(3);
+    expect(info.charCount).toBe(15);
+    expect(info.charCountNoSpaces).toBe(15);
+  });
+
+  it("counts CJK characters as words (no whitespace)", async () => {
+    const p = await createTmpDoc("契約書の内容");
+    const info = await getDocumentInfoStructured(p);
+    // 6 CJK characters → 6 words, since there is no whitespace to split on.
+    expect(info.wordCount).toBe(6);
+    expect(info.charCountNoSpaces).toBe(6);
+  });
+
+  it("counts full-width alphanumerics as words", async () => {
+    const p = await createTmpDoc("ＡＢＣ１２３"); // one full-width run
+    const info = await getDocumentInfoStructured(p);
+    expect(info.wordCount).toBe(1);
+    expect(info.charCountNoSpaces).toBe(6);
+  });
+
+  it("counts a supplementary-plane CJK ideograph once (no surrogate double-count)", async () => {
+    const p = await createTmpDoc("𠮷野家"); // 𠮷 is U+20BB7 (surrogate pair)
+    const info = await getDocumentInfoStructured(p);
+    expect(info.wordCount).toBe(3); // 3 ideographs, not 4
+    expect(info.charCountNoSpaces).toBe(3); // 3 code points, not 4
+  });
+
+  it("includes table cell text in the word/char counts", async () => {
+    const p = await createTmpDoc("intro");
+    await insertTable(p, -1, 1, 2, [["契約", "期間"]]);
+    const info = await getDocumentInfoStructured(p);
+    // intro(1) + 契約(2) + 期間(2) ideographs/words, plus the "[TABLE]" marker.
+    expect(info.wordCount).toBeGreaterThanOrEqual(5);
+    expect(info.charCount).toBeGreaterThan("intro".length);
+  });
+
+  it("gives each heading a section block range that ends before the next same-level heading", async () => {
+    // Blocks: [0] Intro, [1] a, [2] Details, [3] b, [4] c
+    const p = await createTmpDoc("Intro\na\nDetails\nb\nc");
+    await setHeadings(p, [
+      { paragraphIndex: 0, level: 1 },
+      { paragraphIndex: 2, level: 1 },
+    ]);
+    const info = await getDocumentInfoStructured(p);
+    expect(info.outline).toHaveLength(2);
+    // First H1 section spans blocks 0–1 (stops before the next H1 at block 2).
+    expect(info.outline[0]).toMatchObject({ blockIndex: 0, endBlock: 1 });
+    // Last H1 section spans to the end of the document.
+    expect(info.outline[1]).toMatchObject({
+      blockIndex: 2,
+      endBlock: info.lastBlockIndex,
+    });
+  });
+
+  it("nests a lower-level heading inside the parent section range", async () => {
+    // Blocks: [0] H1 Chapter, [1] H2 Section, [2] body, [3] H1 Next
+    const p = await createTmpDoc("Chapter\nSection\nbody\nNext");
+    await setHeadings(p, [
+      { paragraphIndex: 0, level: 1 },
+      { paragraphIndex: 1, level: 2 },
+      { paragraphIndex: 3, level: 1 },
+    ]);
+    const info = await getDocumentInfoStructured(p);
+    // H1 Chapter runs until the next H1 (block 3) → endBlock 2, swallowing the H2.
+    expect(info.outline[0]).toMatchObject({ level: 1, blockIndex: 0, endBlock: 2 });
+    // H2 Section runs until the next same-or-higher heading (the H1 at 3) → endBlock 2.
+    expect(info.outline[1]).toMatchObject({ level: 2, blockIndex: 1, endBlock: 2 });
   });
 
   it("reports comment presence", async () => {

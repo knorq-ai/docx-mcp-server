@@ -162,7 +162,7 @@ server.tool(
 
 server.tool(
   "get_document_info",
-  "Get metadata and structure overview of a DOCX file — paragraph count, headings outline, tables, comment count.",
+  "Get a metadata and structure overview of a DOCX file: total block count and last block index, heading outline where each heading reports its section's block range [blockIndex, endBlock], counts of headings/paragraphs/tables, word and character counts (CJK-aware), comment presence, and an append hint. Call this first to orient before inserting/editing. To append at the true end of the document, use insert_paragraphs with position: -1 (NOT the last index you happened to read in a partial window).",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
   },
@@ -242,6 +242,8 @@ server.tool(
     file_path: z.string().describe("Absolute path to the .docx file"),
     block_index: z
       .number()
+      .int()
+      .gte(0)
       .describe("Block index of the table (from read_document / get_document_info)"),
   },
   async ({ file_path, block_index }) => {
@@ -266,9 +268,9 @@ server.tool(
   "Read a single table cell without reading the whole document. Returns the cell's paragraphs (text + style/alignment/numbering) and its merge info (gridSpan / vMerge). Pair with edit_table_cells to inspect before editing.",
   {
     file_path: z.string().describe("Absolute path to the .docx file"),
-    block_index: z.number().describe("Block index of the table"),
-    row_index: z.number().describe("Zero-based row index"),
-    col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+    block_index: z.number().int().gte(0).describe("Block index of the table"),
+    row_index: z.number().int().gte(0).describe("Zero-based row index"),
+    col_index: z.number().int().gte(0).describe("Zero-based column index (physical w:tc position)"),
   },
   async ({ file_path, block_index, row_index, col_index }) => {
     try {
@@ -1040,9 +1042,11 @@ server.tool(
     file_path: z.string().describe("Absolute path to the .docx file"),
     position: z
       .number()
+      .int()
+      .gte(-1)
       .describe("Block index to insert before (-1 for end)"),
-    rows: z.number().describe("Number of rows"),
-    cols: z.number().describe("Number of columns"),
+    rows: z.number().int().gt(0).describe("Number of rows"),
+    cols: z.number().int().gt(0).describe("Number of columns"),
     data: z
       .array(z.array(z.string()))
       .optional()
@@ -1194,10 +1198,12 @@ server.tool(
       .describe("Page orientation"),
     width_mm: z
       .number()
+      .gt(0)
       .optional()
       .describe("Custom page width in millimeters (overrides preset)"),
     height_mm: z
       .number()
+      .gt(0)
       .optional()
       .describe("Custom page height in millimeters (overrides preset)"),
     margin_preset: z
@@ -1206,13 +1212,13 @@ server.tool(
       .describe(
         "Margin preset: NORMAL, NARROW, WIDE, JP_COURT_25, JP_COURT_30_20",
       ),
-    top_mm: z.number().optional().describe("Top margin in mm"),
-    right_mm: z.number().optional().describe("Right margin in mm"),
-    bottom_mm: z.number().optional().describe("Bottom margin in mm"),
-    left_mm: z.number().optional().describe("Left margin in mm"),
-    header_mm: z.number().optional().describe("Header distance in mm"),
-    footer_mm: z.number().optional().describe("Footer distance in mm"),
-    gutter_mm: z.number().optional().describe("Gutter margin in mm"),
+    top_mm: z.number().gte(0).optional().describe("Top margin in mm"),
+    right_mm: z.number().gte(0).optional().describe("Right margin in mm"),
+    bottom_mm: z.number().gte(0).optional().describe("Bottom margin in mm"),
+    left_mm: z.number().gte(0).optional().describe("Left margin in mm"),
+    header_mm: z.number().gte(0).optional().describe("Header distance in mm"),
+    footer_mm: z.number().gte(0).optional().describe("Footer distance in mm"),
+    gutter_mm: z.number().gte(0).optional().describe("Gutter margin in mm"),
   },
   async ({
     file_path,
@@ -1291,9 +1297,11 @@ server.tool(
         z.object({
           block_index: z
             .number()
+            .int()
+            .gte(0)
             .describe("Index of the table block"),
-          row_index: z.number().describe("Zero-based row index"),
-          col_index: z.number().describe("Zero-based column index"),
+          row_index: z.number().int().gte(0).describe("Zero-based row index"),
+          col_index: z.number().int().gte(0).describe("Zero-based column index"),
           new_text: z
             .string()
             .describe(
@@ -1365,10 +1373,10 @@ server.tool(
     edits: z
       .array(
         z.object({
-          block_index: z.number().describe("Index of the table block"),
-          row_index: z.number().describe("Zero-based row index"),
-          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
-          paragraph_index: z.number().describe("Zero-based paragraph index within the cell"),
+          block_index: z.number().int().gte(0).describe("Index of the table block"),
+          row_index: z.number().int().gte(0).describe("Zero-based row index"),
+          col_index: z.number().int().gte(0).describe("Zero-based column index (physical w:tc position)"),
+          paragraph_index: z.number().int().gte(0).describe("Zero-based paragraph index within the cell"),
           new_text: z.string().describe("New text content for that paragraph"),
         }),
       )
@@ -1411,10 +1419,10 @@ server.tool(
     targets: z
       .array(
         z.object({
-          block_index: z.number().describe("Index of the table block"),
-          row_index: z.number().describe("Zero-based row index"),
-          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
-          paragraph_index: z.number().describe("Zero-based paragraph index within the cell"),
+          block_index: z.number().int().gte(0).describe("Index of the table block"),
+          row_index: z.number().int().gte(0).describe("Zero-based row index"),
+          col_index: z.number().int().gte(0).describe("Zero-based column index (physical w:tc position)"),
+          paragraph_index: z.number().int().gte(0).describe("Zero-based paragraph index within the cell"),
         }),
       )
       .describe("Array of table paragraphs to delete"),
@@ -1455,11 +1463,12 @@ server.tool(
     inserts: z
       .array(
         z.object({
-          block_index: z.number().describe("Index of the table block"),
-          row_index: z.number().describe("Zero-based row index"),
-          col_index: z.number().describe("Zero-based column index (physical w:tc position)"),
+          block_index: z.number().int().gte(0).describe("Index of the table block"),
+          row_index: z.number().int().gte(0).describe("Zero-based row index"),
+          col_index: z.number().int().gte(0).describe("Zero-based column index (physical w:tc position)"),
           position: z
             .number()
+            .int()
             .describe("Cell-local paragraph index to insert before (-1 or out-of-range appends to the cell)"),
           text: z.string().describe("Text content of the new paragraph"),
           style: z.string().optional().describe("Paragraph style (e.g., 'Normal')"),

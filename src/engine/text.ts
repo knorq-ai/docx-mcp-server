@@ -42,6 +42,10 @@ function extractDelRunText(runChildren: XNode[]): string {
       for (const tn of rc["w:delText"]) {
         if (tn["#text"] !== undefined) text += String(tn["#text"]);
       }
+    } else if (rc["w:tab"]) {
+      text += "\t";
+    } else if (rc["w:br"]) {
+      text += "\n";
     }
   }
   return text;
@@ -108,7 +112,7 @@ export function extractCellText(cellChildren: XNode[], showRevisions: boolean): 
       parts.push(extractTableText(child["w:tbl"], showRevisions));
     }
   }
-  return parts.join("\\n");
+  return parts.join("\n");
 }
 
 export function extractTableText(
@@ -191,6 +195,41 @@ export function getHeadingLevel(style: string | undefined): number | undefined {
   return m ? parseInt(m[1]) : undefined;
 }
 
+// CJK ideographs/kana (incl. supplementary-plane extension ideographs). Each
+// counts as one "word" since CJK text has no spaces. The `u` flag matches by
+// code point so a surrogate-pair character is counted once, not twice.
+const CJK_WORD_RE =
+  /[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF66-\uFF9F\u{20000}-\u{2FA1F}]/gu;
+// A latin "word": half-width alphanumerics plus full-width alphanumerics
+// (U+FF10-FF19 / FF21-FF3A / FF41-FF5A), which Japanese documents use for
+// article numbers and identifiers and which would otherwise count as zero.
+const LATIN_CLASS = "0-9A-Za-z\\uFF10-\\uFF19\\uFF21-\\uFF3A\\uFF41-\\uFF5A";
+const LATIN_WORD_RE = new RegExp(
+  `[${LATIN_CLASS}]+(?:['\u2019\\-][${LATIN_CLASS}]+)*`,
+  "gu",
+);
+
+/**
+ * Count words and characters, handling mixed Japanese (CJK) + western text.
+ * - Each CJK ideograph/kana counts as one word (CJK text has no word spaces);
+ *   supplementary-plane (CJK Ext B+) ideographs count once, not twice.
+ * - A run of alphanumerics (half- or full-width) counts as one word.
+ * - chars includes whitespace, charsNoSpaces excludes it; both are code-point
+ *   counts. Note: CJK punctuation (、。\u300C\u300D etc.) is not counted as a word.
+ */
+export function countTextMetrics(text: string): {
+  words: number;
+  chars: number;
+  charsNoSpaces: number;
+} {
+  const chars = [...text].length;
+  const charsNoSpaces = [...text.replace(/\s/g, "")].length;
+  const cjkWords = (text.match(CJK_WORD_RE) || []).length;
+  const latinWords = (text.replace(CJK_WORD_RE, " ").match(LATIN_WORD_RE) || [])
+    .length;
+  return { words: cjkWords + latinWords, chars, charsNoSpaces };
+}
+
 function getParagraphAlignment(pChildren: XNode[]): string | undefined {
   const pPr = findOne(pChildren, "w:pPr");
   if (!pPr) return undefined;
@@ -210,6 +249,28 @@ export interface BlockInfo {
   style?: string;
   alignment?: string;
   headingLevel?: number;
+}
+
+/**
+ * Combined visible text of a block-level `w:sdt` (content control): its inner
+ * paragraphs and tables joined by newlines. Used to render and search an sdt as
+ * a single opaque block.
+ */
+export function extractSdtBlockText(
+  sdtChildren: XNode[],
+  showRevisions: boolean = false,
+): string {
+  const content = findOne(sdtChildren, "w:sdtContent");
+  if (!content) return "";
+  const parts: string[] = [];
+  for (const cc of content["w:sdtContent"] as XNode[]) {
+    if (cc["w:p"]) {
+      parts.push(extractParagraphText(cc["w:p"] as XNode[], showRevisions));
+    } else if (cc["w:tbl"]) {
+      parts.push(extractTableText(cc["w:tbl"] as XNode[], showRevisions));
+    }
+  }
+  return parts.join("\n");
 }
 
 export function enumerateBlocks(
@@ -243,30 +304,17 @@ export function enumerateBlocks(
       });
       idx++;
     } else if (child["w:sdt"]) {
-      // Content controls — extract paragraphs from w:sdtContent
-      const sdtChildren = child["w:sdt"] as XNode[];
-      const sdtContent = findOne(sdtChildren, "w:sdtContent");
-      if (sdtContent) {
-        const contentChildren = sdtContent["w:sdtContent"] as XNode[];
-        for (const contentChild of contentChildren) {
-          if (contentChild["w:p"]) {
-            const pChildren = contentChild["w:p"];
-            const text = extractParagraphText(pChildren, showRevisions);
-            const style = getParagraphStyle(pChildren);
-            const alignment = getParagraphAlignment(pChildren);
-            const hl = getHeadingLevel(style);
-            blocks.push({
-              index: idx,
-              type: "paragraph",
-              text,
-              style,
-              alignment,
-              headingLevel: hl,
-            });
-            idx++;
-          }
-        }
-      }
+      // A block-level content control counts as exactly ONE opaque block (like
+      // a table). Its inner paragraphs are deliberately NOT indexed separately,
+      // so this block-index space stays identical to blockBodyIndices() — the
+      // space every edit tool resolves against. (sdt content is read-only.)
+      blocks.push({
+        index: idx,
+        type: "paragraph",
+        text: extractSdtBlockText(child["w:sdt"] as XNode[], showRevisions),
+        style: "ContentControl",
+      });
+      idx++;
     }
     // Skip sectPr and other non-content elements for block counting
   }

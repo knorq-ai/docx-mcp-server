@@ -60,6 +60,15 @@ describe("read_table_structure", () => {
       code: "INDEX_OUT_OF_RANGE",
     });
   });
+
+  it("rejects a non-integer block index with a controlled error (not a raw crash)", async () => {
+    const p = await createTmpDoc("before");
+    await insertTable(p, -1, 1, 1, [["only"]]);
+    // 1.5 is in [0, length) but not addressable; must throw EngineError, not TypeError.
+    await expect(readTableStructureStructured(p, 1.5)).rejects.toMatchObject({
+      code: "INDEX_OUT_OF_RANGE",
+    });
+  });
 });
 
 // =========================================================================

@@ -152,7 +152,9 @@ export function directBodyParagraphLocations(body: XNode[]): ParagraphLocation[]
     if (node["w:p"]) {
       locations.push({ element: node, parent: body, bodyIndex: i, blockIndex });
       blockIndex++;
-    } else if (node["w:tbl"]) {
+    } else if (node["w:tbl"] || node["w:sdt"]) {
+      // Tables and content controls each advance the block index by one but are
+      // not anchorable; this mirrors blockBodyIndices()/enumerateBlocks().
       blockIndex++;
     }
   }

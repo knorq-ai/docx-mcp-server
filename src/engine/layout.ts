@@ -35,7 +35,7 @@ export const MARGIN_PRESETS: Record<string, { top: number; right: number; bottom
   NORMAL:  { top: 1440, right: 1440, bottom: 1440, left: 1440, label: "Normal (1 in / 25.4 mm all)" },
   NARROW:  { top: 720,  right: 720,  bottom: 720,  left: 720,  label: "Narrow (0.5 in / 12.7 mm all)" },
   WIDE:    { top: 1440, right: 2880, bottom: 1440, left: 2880, label: "Wide (1 in top/bottom, 2 in left/right)" },
-  JP_COURT_25: { top: 1418, right: 1418, bottom: 1418, left: 1418, label: "JP Court 25 mm (25 mm all)" },
+  JP_COURT_25: { top: 1417, right: 1417, bottom: 1417, left: 1417, label: "JP Court 25 mm (25 mm all)" },
   JP_COURT_30_20: { top: 1701, right: 1134, bottom: 1701, left: 1134, label: "JP Court 30/20 mm (30 mm top/bottom, 20 mm left/right)" },
 };
 

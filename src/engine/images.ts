@@ -242,18 +242,14 @@ export async function scanImages(handle: DocxHandle): Promise<ImageInfo[]> {
       await scanNodesForImages(child["w:tbl"] as XNode[], blockIndex);
       blockIndex++;
     } else if (child["w:sdt"]) {
-      // Content controls — match enumerateBlocks logic
-      const sdtChildren = child["w:sdt"] as XNode[];
-      const sdtContent = findOne(sdtChildren, "w:sdtContent");
+      // A content control is exactly ONE block (matches enumerateBlocks /
+      // blockBodyIndices): scan its entire content under this single
+      // blockIndex, then advance once — even if it is empty.
+      const sdtContent = findOne(child["w:sdt"] as XNode[], "w:sdtContent");
       if (sdtContent) {
-        const contentChildren = sdtContent["w:sdtContent"] as XNode[];
-        for (const contentChild of contentChildren) {
-          if (contentChild["w:p"]) {
-            await scanNodesForImages(contentChild["w:p"] as XNode[], blockIndex);
-            blockIndex++;
-          }
-        }
+        await scanNodesForImages(sdtContent["w:sdtContent"] as XNode[], blockIndex);
       }
+      blockIndex++;
     }
     // Skip w:sectPr and other non-content elements
   }

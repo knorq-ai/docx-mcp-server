@@ -2,7 +2,6 @@
  * Comment-related helpers: parsing, infrastructure, anchor matching, markers.
  */
 
-import * as crypto from "crypto";
 import {
   type XNode,
   parser,
@@ -204,11 +203,6 @@ export async function ensureCommentsExtendedInfrastructure(
     "http://schemas.microsoft.com/office/2011/relationships/commentsExtended",
     "commentsExtended.xml",
   );
-}
-
-/** Generate a random 8-char uppercase hex string for w14:paraId */
-export function generateParaId(): string {
-  return crypto.randomBytes(4).toString("hex").toUpperCase();
 }
 
 // ---------------------------------------------------------------------------

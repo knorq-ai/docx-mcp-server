@@ -4,6 +4,7 @@ import {
   cleanupTmpFiles,
   readRawDocXml,
   createCrossRunDoc,
+  createDocWithSdt,
 } from "./helpers.js";
 import {
   formatText,
@@ -33,6 +34,48 @@ describe("formatText", () => {
     await formatText(p, "italic", { italic: true });
     const xml = await readRawDocXml(p);
     expect(xml).toContain("w:i");
+  });
+
+  it("formats text inside a content control (w:sdt)", async () => {
+    const p = await createDocWithSdt("control field value");
+    const result = await formatText(p, "field value", { bold: true });
+    // A global text op must reach sdt content (matches replace_texts).
+    expect(result).toContain("occurrence");
+    const xml = await readRawDocXml(p);
+    const sdtPart = xml.slice(xml.indexOf("<w:sdt"));
+    expect(sdtPart).toContain("<w:b");
+  });
+
+  it("highlights text inside a content control (w:sdt)", async () => {
+    const p = await createDocWithSdt("highlight me here");
+    const result = await highlightText(p, "highlight me", "yellow");
+    expect(result).toContain("occurrence");
+    const xml = await readRawDocXml(p);
+    expect(xml.slice(xml.indexOf("<w:sdt"))).toContain("w:highlight");
+  });
+
+  it("emits w:rPr children in canonical OOXML order", async () => {
+    const p = await createTmpDoc("Order check text");
+    await formatText(p, "Order check", {
+      bold: true,
+      fontName: "Arial",
+      fontSize: 12,
+      fontColor: "#FF0000",
+    });
+    const xml = await readRawDocXml(p);
+    // Scope to the run's rPr (rFonts is canonically first, so slice from it —
+    // this also avoids matching "<w:body" with the "<w:b" token).
+    const block = xml.slice(xml.indexOf("<w:rFonts"));
+    // ECMA-376 CT_RPr order: rFonts < b < color < sz. Word tolerates other
+    // orders but strict validators do not, so assert the canonical sequence.
+    const iFonts = block.indexOf("<w:rFonts");
+    const iB = block.indexOf("<w:b");
+    const iColor = block.indexOf("<w:color");
+    const iSz = block.indexOf("<w:sz ");
+    expect(iFonts).toBe(0);
+    expect(iFonts).toBeLessThan(iB);
+    expect(iB).toBeLessThan(iColor);
+    expect(iColor).toBeLessThan(iSz);
   });
 
   it("applies underline formatting", async () => {

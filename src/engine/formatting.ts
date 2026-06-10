@@ -53,6 +53,39 @@ export function ensureRunProperties(runChildren: XNode[]): XNode {
   return rPr;
 }
 
+// Canonical ECMA-376 child order for w:rPr (CT_RPr) and w:pPr (CT_PPr). Word
+// tolerates out-of-order children, but strict schema validators reject them, so
+// we re-sort after mutating. Elements not listed keep their relative order at
+// the end (stable sort).
+const RPR_ORDER = [
+  "w:rStyle", "w:rFonts", "w:b", "w:bCs", "w:i", "w:iCs", "w:caps",
+  "w:smallCaps", "w:strike", "w:dstrike", "w:outline", "w:shadow", "w:emboss",
+  "w:imprint", "w:noProof", "w:snapToGrid", "w:vanish", "w:webHidden",
+  "w:color", "w:spacing", "w:w", "w:kern", "w:position", "w:sz", "w:szCs",
+  "w:highlight", "w:u", "w:effect", "w:bdr", "w:shd", "w:fitText",
+  "w:vertAlign", "w:rtl", "w:cs", "w:em", "w:lang", "w:eastAsianLayout",
+];
+const PPR_ORDER = [
+  "w:pStyle", "w:keepNext", "w:keepLines", "w:pageBreakBefore", "w:framePr",
+  "w:widowControl", "w:numPr", "w:suppressLineNumbers", "w:pBdr", "w:shd",
+  "w:tabs", "w:suppressAutoHyphens", "w:kinsoku", "w:wordWrap",
+  "w:overflowPunct", "w:topLinePunct", "w:autoSpaceDE", "w:autoSpaceDN",
+  "w:bidi", "w:adjustRightInd", "w:snapToGrid", "w:spacing", "w:ind",
+  "w:contextualSpacing", "w:mirrorIndents", "w:suppressOverlap", "w:jc",
+  "w:textDirection", "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl",
+  "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange",
+];
+
+/** Re-sort a property element's children into canonical OOXML order (stable). */
+function reorderByCanonical(props: XNode[], order: string[]): void {
+  const rank = (n: XNode): number => {
+    const tag = Object.keys(n).find((k) => k !== ":@" && k !== "#text");
+    const i = tag ? order.indexOf(tag) : -1;
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  props.sort((a, b) => rank(a) - rank(b));
+}
+
 export function setRunFormatting(
   runChildren: XNode[],
   fmt: TextFormatting,
@@ -130,6 +163,8 @@ export function setRunFormatting(
     if (idx !== -1) props[idx] = cEl;
     else props.push(cEl);
   }
+
+  reorderByCanonical(props, RPR_ORDER);
 }
 
 export function mapHighlightColor(color: string): string {
@@ -369,4 +404,6 @@ export function applyParagraphFormat(
     if (idx !== -1) props[idx] = indEl;
     else props.push(indEl);
   }
+
+  reorderByCanonical(props, PPR_ORDER);
 }

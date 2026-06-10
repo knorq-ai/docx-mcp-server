@@ -41,6 +41,16 @@ async function makeCellWithParagraphs(lines: string[]): Promise<string> {
 // insert_table_paragraphs
 // =========================================================================
 
+describe("multi-paragraph cell text extraction", () => {
+  it("joins cell paragraphs with a real newline, not a literal backslash-n", async () => {
+    const p = await makeCellWithParagraphs(["line one", "line two"]);
+    const doc = await readDocument(p);
+    // Regression: extractCellText used join("\\n") (literal backslash + n).
+    expect(doc).not.toContain("line one\\nline two");
+    expect(doc).toContain("line one\nline two");
+  });
+});
+
 describe("insert_table_paragraphs", () => {
   it("appends a paragraph to a cell (untracked)", async () => {
     const p = await createTmpDoc("before table");

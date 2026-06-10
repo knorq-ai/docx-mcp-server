@@ -157,15 +157,78 @@ describe("ensure_anchors", () => {
     expect(r.blocks.every((b) => b.anchor && /^[0-9A-F]{8}$/.test(b.anchor) && parseInt(b.anchor, 16) > 0 && parseInt(b.anchor, 16) < 0x80000000)).toBe(true);
   });
 
-  it("does not anchor paragraphs inside a top-level w:sdt", async () => {
+  it("treats a top-level w:sdt as one non-anchorable block (not expanded, not anchored)", async () => {
     const p = await createDocWithSdt("inside the content control");
     const r = await ensureAnchorsStructured(p);
-    // blockBodyIndices excludes the sdt paragraph, so it isn't in blocks…
-    expect(r.blocks.every((b) => !b.textPreview.includes("inside the content control"))).toBe(true);
+    // Doc is [0] paragraph "Normal paragraph", [1] the content control.
+    expect(r.blocks).toHaveLength(2);
+    expect(r.blocks[0].type).toBe("paragraph");
+    expect(r.blocks[0].anchor).toMatch(/^[0-9A-F]{8}$/);
+    // The sdt is exactly one opaque block: type "sdt", no anchor, content shown.
+    const sdtBlock = r.blocks[1];
+    expect(sdtBlock.type).toBe("sdt");
+    expect(sdtBlock.anchor).toBeNull();
+    expect(sdtBlock.textPreview).toContain("inside the content control");
     // …and it never receives a paraId.
     const xml = await readRawDocXml(p);
     const sdtPart = xml.slice(xml.indexOf("<w:sdt"));
     expect(sdtPart).not.toContain("w14:paraId");
+  });
+});
+
+// =========================================================================
+// w:sdt block-index consistency: a block index from search_text/read_document
+// resolves to the same block in the edit tools, even past a content control.
+// =========================================================================
+
+describe("w:sdt block-index consistency (read ↔ edit)", () => {
+  /** [0] "Normal paragraph", [1] w:sdt, [2] the appended target paragraph. */
+  async function sdtDocWithTrailingParagraph(target: string): Promise<string> {
+    const p = await createDocWithSdt("inside the content control");
+    await insertParagraphs(p, [{ text: target, position: -1 }], false);
+    return p;
+  }
+
+  it("counts a content control as exactly one block in get_document_info", async () => {
+    const p = await createDocWithSdt("field value");
+    const info = await getDocumentInfo(p);
+    // [0] Normal paragraph + [1] sdt = 2 blocks (sdt not expanded into its inner paragraph).
+    expect(info).toContain("Total blocks: 2");
+  });
+
+  it("search_text index for a paragraph after an sdt round-trips through edit_paragraphs", async () => {
+    const p = await sdtDocWithTrailingParagraph("TARGET_PARAGRAPH");
+
+    const found = await searchTextStructured(p, "TARGET_PARAGRAPH");
+    expect(found.totalMatches).toBe(1);
+    const blockIndex = found.matches[0].blockIndex;
+    expect(blockIndex).toBe(2); // [0] para, [1] sdt, [2] target
+
+    // The crux: editing by that exact index must hit the target paragraph,
+    // not a different block (the old enumerate/blockBodyIndices mismatch).
+    await editParagraphs(p, [{ paragraphIndex: blockIndex, newText: "EDITED_OK" }], false);
+
+    const after = await searchTextStructured(p, "EDITED_OK");
+    expect(after.totalMatches).toBe(1);
+    expect(after.matches[0].blockIndex).toBe(2);
+    // The content control and the first paragraph are untouched.
+    expect((await searchTextStructured(p, "inside the content control")).totalMatches).toBe(1);
+    expect((await searchTextStructured(p, "Normal paragraph")).totalMatches).toBe(1);
+    expect((await searchTextStructured(p, "TARGET_PARAGRAPH")).totalMatches).toBe(0);
+  });
+
+  it("rejects editing a content-control block by index with NOT_A_PARAGRAPH", async () => {
+    const p = await createDocWithSdt("field value");
+    await expect(
+      editParagraphs(p, [{ paragraphIndex: 1, newText: "nope" }], false),
+    ).rejects.toMatchObject({ code: "NOT_A_PARAGRAPH" });
+  });
+
+  it("rejects deleting a content-control block by index with a clear error", async () => {
+    const p = await createDocWithSdt("field value");
+    await expect(deleteParagraphs(p, [1], false)).rejects.toMatchObject({
+      code: "NOT_A_PARAGRAPH",
+    });
   });
 });
 
